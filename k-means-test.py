@@ -93,17 +93,21 @@ def assign_fixed_size_labels(image_paths):
     label_map = {}
     current_label_id = 0
 
-    # 画像サイズごとの出現回数をカウント
+    # 画像サイズごとの出現回数をカウントし、サイズ情報も保存
     from collections import Counter, defaultdict
     size_counter = Counter()
     size_to_paths = defaultdict(list)
+    size_info = []  # (path, w, h) のリスト
+
     for i, path in enumerate(image_paths):
         try:
-            img = Image.open(path)
-            w, h = img.size
-            size_counter[(w, h)] += 1
-            size_to_paths[(w, h)].append(path)
+            with Image.open(path) as img:
+                w, h = img.size
+                size_counter[(w, h)] += 1
+                size_to_paths[(w, h)].append(path)
+                size_info.append((path, w, h))
         except Exception:
+            size_info.append((path, None, None))
             continue
         if i % 10 == 0 or i == len(image_paths) - 1:
             sys.stdout.write(f"\rSearching for popular sizes: {i}/{len(image_paths)} ({(i / len(image_paths)) * 100:.2f}%)")
@@ -113,10 +117,12 @@ def assign_fixed_size_labels(image_paths):
     min_count = max(10, int(len(image_paths) * 0.05))
     popular_sizes = {size for size, count in size_counter.items() if count >= min_count}
 
-    for i, path in enumerate(image_paths):
+    print()
+
+    for i, (path, w, h) in enumerate(size_info):
         try:
-            img = Image.open(path)
-            w, h = img.size
+            if w is None or h is None:
+                raise ValueError("Image size not available")
             area = w * h
             aspect_ratio = w / h if h != 0 else 0
 
@@ -147,8 +153,8 @@ def assign_fixed_size_labels(image_paths):
 
             labels.append(label_map[folder_name])
 
-            if i % 10 == 0 or i == len(image_paths) - 1:
-                sys.stdout.write(f"\r進捗: {i}/{len(image_paths)} ({(i / len(image_paths)) * 100:.2f}%)")
+            if i % 10 == 0 or i == len(size_info) - 1:
+                sys.stdout.write(f"\r進捗: {i}/{len(size_info)} ({(i / len(size_info)) * 100:.2f}%)")
                 sys.stdout.flush()
 
         except Exception as e:
@@ -159,12 +165,12 @@ def assign_fixed_size_labels(image_paths):
 
 
 # 最適クラスタ数を自動判定（シルエットスコア）
-def find_best_k(features_np, k_range=range(2, 13)): # k_rangeを2からに修正（シルエットスコアの最小要件）
+def find_best_k(features_np, k_range=range(5, 13)):
     best_score = -1
     best_k = 2
     for k in k_range:
         try:
-            kmeans = KMeans(n_clusters=k, random_state=0, n_init='auto') # n_init='auto' を追加して警告を回避
+            kmeans = KMeans(n_clusters=k, random_state=0, n_init=10) # n_initを整数に修正
             labels = kmeans.fit_predict(features_np)
             # クラスタが1つしかない場合や、データ点がクラスタ数より少ない場合はシルエットスコア計算不可
             if len(set(labels)) < 2:
@@ -246,18 +252,18 @@ def main():
                         help='画像フォルダのパス（デフォルト: カレントディレクトリ）')
     parser.add_argument('--recursive', action='store_true',
                         help='サブフォルダも再帰的に検索する場合は指定')
-    parser.add_argument('--use-picture', action='store_true', dest='check_picture', # デフォルトをFalseに変更
-                        help='CLIP特徴を取得して分類する場合は指定') # オプション名を変更
-    parser.add_argument('--use-size-rule', action='store_true', dest='check_size_rule', # 新しいオプション
-                        help='固定閾値でサイズ分類する場合は指定')
+    #parser.add_argument('--use-picture', action='store_true', dest='check_picture', # デフォルトをFalseに変更
+    #                    help='CLIP特徴を取得して分類する場合は指定') # オプション名を変更
+    parser.add_argument('--size', action='store_true', dest='check_size_rule', # 新しいオプション
+                        help='サイズ分類する場合は指定')
     parser.add_argument('--k', type=int, default=None,
                         help='K-Meansのクラスタ数を手動で指定する場合（デフォルト: 自動判定）')
     args = parser.parse_args()
     img_dir = args.dir
     n_max = args.max
     recursive = args.recursive
-    check_picture = args.check_picture      # CLIP特徴を使うか
     check_size_rule = args.check_size_rule  # 固定閾値のサイズ分類を使うか
+    check_picture = not check_size_rule # どちらか一方を使う
 
     print("searching for images in the current directory...")
     sys.stdout.flush()
@@ -295,7 +301,7 @@ def main():
             best_k = args.k
             print(f"クラスタ数 (手動指定): {best_k}")
 
-        kmeans = KMeans(n_clusters=best_k, random_state=0, n_init='auto')
+        kmeans = KMeans(n_clusters=best_k, random_state=0, n_init=10)
         labels = kmeans.fit_predict(features_np)
         cluster_names = describe_clusters(features_np, image_paths, labels, kmeans)
         output_dir = "output_by_clip_kmeans"
