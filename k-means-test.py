@@ -172,36 +172,6 @@ def describe_clusters(features_np, image_paths, labels, kmeans):
         # 例：f"cl_{center_hash[:6]}"
         
     return cluster_names
-# 固定閾値分類の場合はこの関数は使用しないか、別の目的で使う
-def describe_clusters2(features_np, image_paths, labels, kmeans):
-    from sklearn.metrics import pairwise_distances_argmin_min
-    from collections import Counter, defaultdict
-    cluster_names = {}
-    for i in range(kmeans.n_clusters):
-        indices = [j for j, label in enumerate(labels) if label == i]
-        if not indices:
-            cluster_names[i] = f"cluster_{i}"
-            continue
-        cluster_center = kmeans.cluster_centers_[i].reshape(1, -1)
-        cluster_features = features_np[indices]
-        
-        if cluster_features.shape[0] == 0:
-            cluster_names[i] = f"cluster_{i}"
-            continue
-
-        closest_idx, _ = pairwise_distances_argmin_min(cluster_center, cluster_features)
-        best_idx_in_cluster = closest_idx[0] 
-        best_idx = indices[best_idx_in_cluster]
-
-        try:
-            with Image.open(image_paths[best_idx]) as img:
-                w, h = img.size
-                # クラスタ名を代表画像のアスペクト比とサイズで付ける
-                cluster_names[i] = f"{w}x{h}_ratio_{w/h:.2f}"
-        except Exception:
-            basename = os.path.splitext(os.path.basename(image_paths[best_idx]))[0]
-            cluster_names[i] = basename[:20] or f"cluster_{i}"
-    return cluster_names
 
 # 画像パスを取得する関数（再帰的にディレクトリを探索）
 def get_image_paths(img_dir, recursive=False):
@@ -252,7 +222,7 @@ def main():
     check_size_rule = args.check_size_rule  # 固定閾値のサイズ分類を使うか
     check_picture = not check_size_rule # どちらか一方を使う
 
-    print("searching for images in the directory...")
+    print("Searching for images in the directory...")
     sys.stdout.flush()
     image_paths = get_image_paths(img_dir, recursive)
 
@@ -282,7 +252,7 @@ def main():
         
         # K-Meansの入力とする画像パスを再構築
         processed_image_paths_for_clustering = [image_paths[idx] for idx in processed_indices]
-        original_indices_for_clustering = processed_indices # 後の Unknown 処理のために保持
+        # original_indices_for_clustering = processed_indices # 後の Unknown 処理のために保持
 
         print(f"\n特徴量の形状: {features_np.shape} (処理対象の画像数: {len(processed_image_paths_for_clustering)})")
 
