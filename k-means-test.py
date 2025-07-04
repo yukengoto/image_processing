@@ -10,27 +10,34 @@ import open_clip
 # 画像読み込み & 特徴量抽出用関数（再利用しやすくする）
 def extract_features(image_paths, model, preprocess):
     features = []
-    for i, path in enumerate(image_paths, 1):
-        try:
-            image = preprocess(Image.open(path).convert("RGB")).unsqueeze(0)
-            with torch.no_grad():
-                feat = model.encode_image(image)
-            features.append(feat[0].numpy())
+    size_features = []
 
-            # 一行で進捗表示
-            if i % 10 == 0 or i == len(image_paths):
-                sys.stdout.write(f"\r進捗: {i}/{len(image_paths)} ({(i / len(image_paths)) * 100:.2f}%)")
+    for path in image_paths:
+        try:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model.to(device)
+            img = Image.open(path).convert("RGB")
+            w, h = img.size
+            size_feat = [w, h, w / h]  # 幅, 高さ, アスペクト比
+            image = preprocess(img).unsqueeze(0).to(device)
+            with torch.no_grad():
+                feat = model.encode_image(image).cpu().numpy()[0]
+            features.append(feat)
+            size_features.append(size_feat)
+
+            # 進捗表示
+            if len(features) % 10 == 0:
+                sys.stdout.write(f"\r進捗: {len(features)}/{len(image_paths)}")
                 sys.stdout.flush()
         except KeyboardInterrupt:
             print("\n中断されました。")
             raise
-        except:
+        except Exception:
             continue
-    print()  # 改行
-    return features
+    return features, size_features
 
 # 最適クラスタ数を自動判定（シルエットスコア）
-def find_best_k(features_np, k_range=range(2, 21)):
+def find_best_k(features_np, k_range=range(5, 15)):
     best_score = -1
     best_k = 2
     for k in k_range:
@@ -64,7 +71,12 @@ def describe_clusters(features_np, image_paths, labels, kmeans):
 
 # メイン処理
 def main():
+    # take first N of image_paths for testing
+    test_max = 100000
     img_dir = "."
+    #
+    print("searching for images in the current directory...")
+    sys.stdout.flush()
     image_paths = [os.path.join(img_dir, f) for f in os.listdir(img_dir)
                    if f.endswith(('.jpg', '.JPG', '.png'))]
 
@@ -74,8 +86,6 @@ def main():
 
     print(f"画像フォルダにある画像の数: {len(image_paths)}")
 
-    # take first N of image_paths for testing
-    test_max = 100000
     if len(image_paths) > test_max:
         print(f"画像が多すぎるため、最初の{test_max}枚のみを使用します。")
         image_paths = image_paths[:test_max]
@@ -83,22 +93,37 @@ def main():
     model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
     model.eval()
 
-    features = extract_features(image_paths, model, preprocess)
+    features, size_features = extract_features(image_paths, model, preprocess)
     if not features:
         print("エラー: featuresが空です。画像の読み込みに失敗した可能性があります。")
         return
+    if not size_features:
+        print("エラー: size_featuresが空です。画像の読み込みに失敗した可能性があります。")
+        return
 
+    # numpy 配列に変換
     features_np = np.array(features)
+    size_np = np.array(size_features)
+
+    # サイズ情報を正規化（スケーリング）
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    size_np_scaled = scaler.fit_transform(size_np)
+
+    # CLIP特徴と連結
+    combined_features = np.concatenate([features_np, size_np_scaled], axis=1)
+
     print(f"\n特徴量の形状: {features_np.shape}")
+    print(f"\n特徴量の形状: {combined_features.shape}")
 
     print("\n最適なクラスタ数を探索中...")
-    best_k = find_best_k(features_np)
+    best_k = find_best_k(combined_features)
     print(f"→ 最適なクラスタ数は {best_k}")
 
     kmeans = KMeans(n_clusters=best_k, random_state=0)
-    labels = kmeans.fit_predict(features_np)
+    labels = kmeans.fit_predict(combined_features)
 
-    cluster_names = describe_clusters(features_np, image_paths, labels, kmeans)
+    cluster_names = describe_clusters(combined_features, image_paths, labels, kmeans)
 
     print("\n画像をクラスタごとに移動中...")
     os.makedirs("output", exist_ok=True)
