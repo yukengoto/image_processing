@@ -134,7 +134,7 @@ def assign_fixed_size_labels(image_paths):
 
 
 # 最適クラスタ数を自動判定（シルエットスコア）
-def find_best_k(features_np, k_range=range(5, 13)):
+def find_best_k(features_np, k_range=range(10, 21)):
     best_score = -1
     best_k = 2
     for k in k_range:
@@ -253,12 +253,19 @@ def main():
         # K-Meansの入力とする画像パスを再構築
         processed_image_paths_for_clustering = [image_paths[idx] for idx in processed_indices]
         # original_indices_for_clustering = processed_indices # 後の Unknown 処理のために保持
-
-        print(f"\n特徴量の形状: {features_np.shape} (処理対象の画像数: {len(processed_image_paths_for_clustering)})")
+        npics = len(processed_image_paths_for_clustering)
+        print(f"\n特徴量の形状: {features_np.shape} (処理対象の画像数: {npics})")
 
         if args.k is None:
             print("\n最適なクラスタ数を探索中...")
-            best_k = find_best_k(features_np)
+            min_k = int(npics/1000) # 最小クラスタ数を画像数の1/500に設定
+            max_k = int(npics/100) # 最大クラスタ数を画像数の1/100に設定
+            if min_k < 8: min_k = 10 # 最小クラスタ数を10に制限
+            elif min_k > 30: min_k = 30 # 最小クラスタ数を30に制限
+            if max_k > 30: max_k = 30
+            elif max_k <= min_k + 4: max_k = min_k + 4
+            print(f"→ クラスタ数の範囲: {min_k} 〜 {max_k}")
+            best_k = find_best_k(features_np, k_range=range(min_k, max_k))
             print(f"→ 最適なクラスタ数は {best_k}")
         else:
             best_k = args.k
