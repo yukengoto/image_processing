@@ -7,7 +7,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 import torch
 import open_clip
-# from sklearn.preprocessing import StandardScaler # 追加
+import hashlib # ハッシュ値の生成に必要
 
 # 画像読み込み & CLIP特徴量抽出用関数
 def extract_features(image_paths, model, preprocess):
@@ -34,10 +34,7 @@ def extract_features(image_paths, model, preprocess):
             raise
         except Exception as e:
             print(f"\nエラー発生（{path}）：{e} - この画像をスキップします。")
-            # エラーが発生した場合は、その画像を処理済みとして扱わないが、
-            # 後でラベルを生成する際には対応する位置を考慮する必要がある。
-            # ここでは features には追加しないまま続行し、後で処理
-            continue # このままcontinueで良い
+            continue
 
     if not features:
         print("エラー: featuresが空です。画像の読み込みに失敗した可能性があります。")
@@ -48,18 +45,25 @@ def extract_features(image_paths, model, preprocess):
 
 # 固定閾値でサイズ分類を行う関数
 def assign_fixed_size_labels(image_paths):
-    labels = []
+    labels = [None] * len(image_paths) # 初期化をNoneで埋める
     cluster_names = {}
-
-    # 閾値定義
+    
     THRESHOLD_AREA_SMALL = 250 * 250
     THRESHOLD_AREA_MEDIUM = 1100 * 900
+    
     THRESHOLD_ASPECT_PORTRAIT = 0.95
-    THRESHOLD_ASPECT_SQUARE = 1.05
-
+    THRESHOLD_ASPECT_SQUARE = 1.05    
+    
     # クラスタ名マッピング用
     label_map = {}
     current_label_id = 0
+    
+    # "Unknown_Error" のためのラベルIDを事前に確保
+    unknown_folder_name = "Unknown_Error"
+    if unknown_folder_name not in label_map:
+        label_map[unknown_folder_name] = current_label_id
+        cluster_names[current_label_id] = unknown_folder_name
+        current_label_id += 1
 
     # 画像サイズごとの出現回数をカウントし、サイズ情報も保存
     from collections import Counter, defaultdict
@@ -76,17 +80,18 @@ def assign_fixed_size_labels(image_paths):
                 size_info.append((path, w, h))
         except Exception:
             size_info.append((path, None, None))
-            continue
-        if i % 10 == 0 or i == len(image_paths) - 1:
-            sys.stdout.write(f"\rSearching for popular sizes: {i}/{len(image_paths)} ({(i / len(image_paths)) * 100:.2f}%)")
+            # continue # エラー時もリストに追加して長さを維持
+
+        if (i + 1) % 10 == 0 or (i + 1) == len(image_paths):
+            sys.stdout.write(f"\rSearching for popular sizes: {i+1}/{len(image_paths)} ({(i+1) / len(image_paths) * 100:.2f}%)")
             sys.stdout.flush()
 
     # 多数派サイズの閾値（例: 画像数の2%以上かつ5枚以上）
     min_count = max(5, int(len(image_paths) * 0.02))
-    if min_count > 100: min_count = 20  # 上限を設定しておくと良い
+    if min_count > 100: min_count = 20 # 上限を設定しておくと良い
     popular_sizes = {size for size, count in size_counter.items() if count >= min_count}
 
-    print()
+    print() # 改行
 
     for i, (path, w, h) in enumerate(size_info):
         try:
@@ -120,15 +125,20 @@ def assign_fixed_size_labels(image_paths):
                 cluster_names[current_label_id] = folder_name
                 current_label_id += 1
 
-            labels.append(label_map[folder_name])
-
-            if i % 10 == 0 or i == len(size_info) - 1:
-                sys.stdout.write(f"\r進捗: {i}/{len(size_info)} ({(i / len(size_info)) * 100:.2f}%)")
-                sys.stdout.flush()
+            labels[i] = label_map[folder_name] # 正しい位置にラベルを格納
 
         except Exception as e:
-            print(f"\nWarning: Could not process {path} due to error: {e}. Skipping.")
-            labels.append(-1)
+            print(f"\nWarning: Could not process {path} due to error in assign_fixed_size_labels: {e}. Assigning to '{unknown_folder_name}'.")
+            labels[i] = label_map[unknown_folder_name] # エラー時はUnknown_Errorカテゴリに割り当てる
+            
+        if (i + 1) % 10 == 0 or (i + 1) == len(size_info):
+            sys.stdout.write(f"\r進捗 (サイズ分類): {i+1}/{len(size_info)} ({(i+1) / len(size_info) * 100:.2f}%)")
+            sys.stdout.flush()
+
+    # 全ての画像パスに対応するラベルが割り当てられていることを確認
+    if None in labels:
+        print("致命的なエラー: 未割り当てのラベルが存在します。処理を中断します。")
+        sys.exit(1)
 
     return np.array(labels), cluster_names
 
@@ -137,96 +147,52 @@ def assign_fixed_size_labels(image_paths):
 def find_best_k(features_np, k_range=range(10, 21)):
     best_score = -1
     best_k = 2
+    if len(features_np) < 2: # データ点が少ない場合はクラスタリングできない
+        return 1
+    
+    # k_rangeをデータ点数で調整
+    if len(features_np) < k_range.stop:
+        k_range = range(k_range.start, max(2, len(features_np))) # データ点数まで
+    
     for k in k_range:
         try:
-            kmeans = KMeans(n_clusters=k, random_state=0, n_init=10) # n_initを整数に修正
+            kmeans = KMeans(n_clusters=k, random_state=0, n_init=10)
             labels = kmeans.fit_predict(features_np)
-            # クラスタが1つしかない場合や、データ点がクラスタ数より少ない場合はシルエットスコア計算不可
-            if len(set(labels)) < 2:
+            if len(set(labels)) < 2: # クラスタが1つしかない場合はシルエットスコア計算不可
                 continue
             score = silhouette_score(features_np, labels)
             if score > best_score:
                 best_score = score
                 best_k = k
-        except Exception as e: # エラー内容も表示
+        except Exception as e:
             print(f"\nKMeans (k={k}) error: {e}")
             continue
     return best_k
 
-# ラベルに名前をつける（中心ベクトルに最も近い画像のファイル名を参考に）
-# describe_clusters 関数（変更案）
-def describe_clusters(labels, kmeans, clip_model, clip_tokenizer):
-    from sklearn.metrics import pairwise_distances_argmin_min
-    import torch
-    import hashlib
-    #
+# describe_clusters 関数をK-Meansの結果にキーワードベースの命名を行う関数として維持
+def describe_clusters(kmeans_labels, kmeans_model, clip_model, clip_tokenizer, features_for_kmeans):
     cluster_names = {}
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    clip_model.to(device)
-
-    # 事前に定義するキーワードリスト (例: ユーザーが期待するカテゴリや一般的な画像内容)
-    # これらをCLIPでエンコードし、画像特徴量と比較する
-    # あなたの画像群の内容に合わせて、このリストを調整してください
+    
+    # 以前のdescribe_clustersで使っていたキーワードリスト
     keywords = [
-        "a picture of a person",
-        "an outdoor landscape",
-        "a building",
-        "an animal",
-        "a close up of a face",
-        "a scene with many objects",
-        "a digital art illustration",
-        "a cartoon character",
-        "a professional photo",
-        "a blurred background",
-        "a text document",
-        "a screenshot",
-        "a natural scene",
-        "a city view",
-        "a food item",
-        "a vehicle",
-        "a plant or flower",
-        "a abstract image",
-        "a black and white photo",
-        "a vibrant colorful image",
-        # さらに具体的なキーワードを追加する
-        "an anime character",
-        "a game screenshot",
-        "a CD album cover",
-        "a travel destination",
-        "a glamour photo",
-        "a portrait",
-        "a group of people",
-        "a landscape with water",
-        "a mountain view",
-        "an indoor scene",
-        "a foot",
-        "a leg",
-        "a sole",
-        "a toe",
-        "a heel",
-        "a vagina",
-        "a penis",
-        "kissing",
-        "two or more women",
-        "a foot and a penis",
-        "an ugly face",
-        "a breast",
-        "a nipple",
-        "a butt",
-        "a face",
-        "a mouth",
-        "a mouth and penis",
-        "a face and penis",
-        "a girl",
-        "a shoe",
-        "a socks",
-        "a hand",
-        "a female body",
-        "a landscape"
+        "a picture of a person", "an outdoor landscape", "a building", "an animal",
+        "a close up of a face", "a scene with many objects", "a digital art illustration",
+        "a cartoon character", "a professional photo", "a blurred background",
+        "a text document", "a screenshot", "a natural scene", "a city view",
+        "a food item", "a vehicle", "a plant or flower", "a abstract image",
+        "a black and white photo", "a vibrant colorful image",
+        "an anime character", "a game screenshot", "a CD album cover",
+        "a travel destination", "a glamour photo", "a portrait",
+        "a group of people", "a landscape with water", "a mountain view",
+        "an indoor scene", "a foot", "a leg", "a sole", "a toe", "a heel",
+        "a vagina", "a penis", "kissing", "two or more women", "a foot and a penis",
+        "an ugly face", "a breast", "a nipple", "a butt", "a face", "a mouth",
+        "a mouth and penis", "a face and penis", "a girl", "a shoe", "a socks",
+        "a hand", "a female body", "a landscape"
     ]
     
-    # キーワードのCLIPテキスト特徴量を事前に計算
-    print("\nキーワードのCLIPテキスト特徴量を計算中...")
+    print("\nキーワードのCLIPテキスト特徴量を計算中 (K-Meansクラスタ命名用)...")
     text_features = []
     with torch.no_grad():
         for kw in keywords:
@@ -236,53 +202,45 @@ def describe_clusters(labels, kmeans, clip_model, clip_tokenizer):
     text_features_np = np.array(text_features)
     print("キーワード特徴量の計算完了。")
 
-    for i in range(kmeans.n_clusters):
-        indices = [j for j, label in enumerate(labels) if label == i]
-        if not indices:
+    for i in range(kmeans_model.n_clusters):
+        # features_for_kmeans からこのクラスタに属する特徴量を抽出
+        indices_in_kmeans_data = np.where(kmeans_labels == i)[0]
+        if not indices_in_kmeans_data.size:
             cluster_names[i] = f"empty_cluster_{i}"
             continue
 
-        cluster_center_feature = kmeans.cluster_centers_[i]
+        cluster_center_feature = kmeans_model.cluster_centers_[i]
         
-        # クラスタ中心と最も類似するキーワードを見つける
-        # cosine similarity (内積) を計算するために正規化が必要
         normalized_cluster_center = cluster_center_feature / np.linalg.norm(cluster_center_feature)
         
         similarities = np.dot(normalized_cluster_center, text_features_np.T)
-        best_keyword_idx = np.argmax(similarities)
-        best_keyword_similarity = similarities[best_keyword_idx]
-        # キーワードから先頭の "a picture of ", "an " などを除去してクラスタ名にする
-        base_name = keywords[best_keyword_idx].replace("a picture of ", "").replace("an ", "").replace("a ", "").strip()
+        sorted_indices = np.argsort(similarities)[::-1]
+        
+        best_keyword_idx_1 = sorted_indices[0]
+        best_keyword_idx_2 = sorted_indices[1]
+        
+        best_keyword_1 = keywords[best_keyword_idx_1]
+        best_keyword_2 = keywords[best_keyword_idx_2]
+        
+        best_similarity_1 = similarities[best_keyword_idx_1]
+        best_similarity_2 = similarities[best_keyword_idx_2]
 
+        base_name_1 = best_keyword_1.replace("a picture of ", "").replace("an ", "").replace("a ", "").strip()
+        base_name_2 = best_keyword_2.replace("a picture of ", "").replace("an ", "").replace("a ", "").strip()
+        
+        # クラスタ中心のハッシュ値も追加して安定性を確保
         center_hash = hashlib.sha256(cluster_center_feature.tobytes()).hexdigest()
-        # フォルダ名として適切な形に整形 (例: スペースをアンダースコアに)
-        # 類似度も表示すると、ラベリングの信頼性が分かる
-        # ハッシュ値の一部をフォルダ名として使用（長すぎると不便なので、先頭8文字程度）
-        cluster_names[i] = f"{base_name.replace(' ', '_')}_sim{best_keyword_similarity:.2f}_{center_hash[:8]}"
-    return cluster_names
 
-def describe_clusters_simple(features_np, image_paths, labels, kmeans):
-    import hashlib
-    cluster_names = {}
-    for i in range(kmeans.n_clusters):
-        cluster_center = kmeans.cluster_centers_[i]
-        
-        # クラスタ中心のベクトルをバイト列に変換し、SHA256ハッシュを計算
-        # 高精度で一意性を保つため、float64のバイト表現を使用
-        center_hash = hashlib.sha256(cluster_center.tobytes()).hexdigest()
-        
-        # ハッシュ値の一部をフォルダ名として使用（長すぎると不便なので、先頭10文字程度）
-        cluster_names[i] = f"cluster_{center_hash[:10]}" 
-        
-        # オプション：より短くしたい場合は、より短いハッシュアルゴリズムを使うか、
-        # さらに短く切り詰めることも可能ですが、衝突の可能性が高まります
-        # 例：f"cl_{center_hash[:6]}"
+        cluster_names[i] = (
+            f"{base_name_1.replace(' ', '_')}_{base_name_2.replace(' ', '_')}_"
+            f"sim{best_similarity_1:.2f}_{best_similarity_2:.2f}_id{center_hash[:8]}"
+        )
         
     return cluster_names
 
 # 画像パスを取得する関数（再帰的にディレクトリを探索）
 def get_image_paths(img_dir, recursive=False):
-    exts = ('.jpg', '.png', '.jpeg', '.gif', '.bmp', '.tiff', '.webp') # 拡張子を増やすと良い
+    exts = ('.jpg', '.png', '.jpeg', '.gif', '.bmp', '.tiff', '.webp')
     image_paths = []
 
     if recursive:
@@ -316,18 +274,25 @@ def main():
                         help='画像フォルダのパス（デフォルト: カレントディレクトリ）')
     parser.add_argument('--recursive', '-r', action='store_true',
                         help='サブフォルダも再帰的に検索する場合は指定')
-    #parser.add_argument('--use-picture', action='store_true', dest='check_picture', # デフォルトをFalseに変更
-    #                    help='CLIP特徴を取得して分類する場合は指定') # オプション名を変更
-    parser.add_argument('--size', action='store_true', dest='check_size_rule', # 新しいオプション
+    parser.add_argument('--size', action='store_true', dest='check_size_rule',
                         help='サイズ分類する場合は指定')
     parser.add_argument('--k', '-k', type=int, default=None,
                         help='K-Meansのクラスタ数を手動で指定する場合（デフォルト: 自動判定）')
+    parser.add_argument('--hybrid', action='store_true', dest='use_hybrid_clip',
+                        help='キーワード分類後に残りをK-Meansで分類するハイブリッドモードを使用') # 新しいオプション
+    
     args = parser.parse_args()
     img_dir = args.dir
     n_max = args.max
     recursive = args.recursive
-    check_size_rule = args.check_size_rule  # 固定閾値のサイズ分類を使うか
-    check_picture = not check_size_rule # どちらか一方を使う
+    check_size_rule = args.check_size_rule
+    use_hybrid_clip = args.use_hybrid_clip
+
+    # 少なくとも1つの分類方法が指定されているか確認
+    if not (check_size_rule or use_hybrid_clip):
+        print("エラー: 少なくとも1つの分類方法 (--size または --hybrid) を指定してください。")
+        parser.print_help()
+        return
 
     print("Searching for images in the directory...")
     sys.stdout.flush()
@@ -343,85 +308,180 @@ def main():
         print(f"画像が多すぎるため、最初の{n_max}枚のみを使用します。")
         image_paths = image_paths[:n_max]
 
-    # CLIPモデルのロードはcheck_pictureがTrueの場合のみ
-    model, _, preprocess = None, None, None # 初期化
-    if check_picture:
+    # CLIPモデルのロードはハイブリッドモードで必要
+    model, _, preprocess = None, None, None
+    if use_hybrid_clip:
         model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
         model.eval()
 
-    labels = []
-    cluster_names = {}
+    # 最終的なラベルとクラスタ名
+    final_labels = np.full(len(image_paths), -1, dtype=object) # カテゴリ名文字列やK-Meansラベルを格納するためdtype=object
+    final_cluster_names = {}
+    
+    # 未処理の画像用の"Unknown_Error"カテゴリを定義
+    unknown_label_key = "Unknown_Error_System_Key" # 内部的なキーとして使う
+    final_cluster_names[unknown_label_key] = "Unknown_Error" # フォルダ名
 
-    if check_picture: # CLIP特徴量でK-Meansクラスタリング
-        print("\nCLIP特徴量でクラスタリング中...")
-        # extract_featuresは正常に処理された画像のfeaturesと、その元のインデックスを返す
-        features_np, processed_indices = extract_features(image_paths, model, preprocess)
+    if use_hybrid_clip:
+        print("\nハイブリッド分類 (キーワード & K-Means) を実行中...")
         
-        # K-Meansの入力とする画像パスを再構築
-        processed_image_paths_for_clustering = [image_paths[idx] for idx in processed_indices]
-        # original_indices_for_clustering = processed_indices # 後の Unknown 処理のために保持
-        npics = len(processed_image_paths_for_clustering)
-        print(f"\n特徴量の形状: {features_np.shape} (処理対象の画像数: {npics})")
+        # 1. 全ての画像からCLIP特徴量を抽出
+        features_all_np, processed_indices_all = extract_features(image_paths, model, preprocess)
+        
+        # 各画像の元のインデックスを特徴量に対応させるマップ
+        original_idx_map = {idx_in_features: original_img_idx for idx_in_features, original_img_idx in enumerate(processed_indices_all)}
 
-        if args.k is None:
-            print("\n最適なクラスタ数を探索中...")
-            min_k = int(npics/1000) # 最小クラスタ数を画像数の1/500に設定
-            max_k = int(npics/100) # 最大クラスタ数を画像数の1/100に設定
-            if min_k < 8: min_k = 10 # 最小クラスタ数を10に制限
-            elif min_k > 30: min_k = 30 # 最小クラスタ数を30に制限
+        # CLIPトークナイザーもここで取得
+        clip_tokenizer = open_clip.get_tokenizer('ViT-B-32')
+
+        # キーワードの定義 (describe_clusters と同じものを使用)
+        keywords_for_classification = {
+            "Landscape": ["an outdoor landscape", "a natural scene", "a mountain view"],
+            "Person": ["a picture of a person", "a portrait", "a group of people"],
+            "Building": ["a building", "a city view", "architecture"],
+            "Animal": ["an animal", "a pet", "wildlife"],
+            "Art_Illustration": ["a digital art illustration", "a cartoon character", "an abstract image"],
+            "Text_Document": ["a text document", "a screenshot"],
+            "Object_Misc": ["a scene with many objects", "a food item", "a vehicle", "a hand"],
+            "Anime": ["an anime character", "a game screenshot", "a CD album cover"],
+            "Other_Visual": ["a blurred background", "a black and white photo", "a vibrant colorful image", "a girl"],
+            # 37
+            "a4": ["foot", "barefoot", "calf", "barefoot soles", "leg", "sole", "toes", "toenails", "heel", "a foot and a penis", "penis massage by feet" "shoes", "sandals", "socks"],
+            "10005": ["a vagina", "between legs",],
+            "face": ["a fimale face", "a female portrait"],
+            "mouth": ["mouth", "teeth", "lips", "tongue"],
+            "bj": ["a mouth and penis", "a face and penis", "blow job", "oral sex"],
+            "fin": ["ejaculation", "semen", "sperm"],
+            "sv": ["penis massage by hand, a hand and a penis", "submissive", "obedience", "slavish"],
+            "soft":["underware", "swimsuit", "bra"],
+            "1011": ["little girl"],
+            "1010": ["toilet", "japanese-style toilet", "using japanese-style toilet", "peeing", "excretion", "feces"],
+            "fk": ["people having sex", "a girl getting fucked"],
+            "multi" :["multiple girls"],
+            "body" :["female body","a breast", "a nipple", "a butt"],
+            "chu": ["kissing"]
+        }
+        
+        # キーワードのCLIPテキスト特徴量を事前に計算
+        keyword_features_map = {} # {カテゴリ名: そのカテゴリの代表キーワード特徴量}
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        for category, kw_list in keywords_for_classification.items():
+            text = clip_tokenizer(kw_list[0]).to(device) # 各カテゴリの最初のキーワードを代表とする
+            with torch.no_grad():
+                text_feat = model.encode_text(text).cpu().numpy()[0]
+            keyword_features_map[category] = text_feat / np.linalg.norm(text_feat) # 正規化
+        
+        keyword_categories = list(keyword_features_map.keys())
+        keyword_features_np = np.array(list(keyword_features_map.values()))
+
+        # 2. キーワードによる直接分類
+        print("\nキーワードに最も近い画像を分類中...")
+        classified_by_keyword_mask = np.zeros(len(features_all_np), dtype=bool) # キーワード分類されたかどうかのマスク
+        keyword_classification_threshold = 0.20 # この類似度以上でキーワードに分類
+        
+        # ユニークなラベルIDを生成するためのカウンター
+        current_unique_label_id = 0 
+
+        for i, feat in enumerate(features_all_np):
+            original_img_idx = original_idx_map[i] # 元のimage_pathsでのインデックス
+            
+            normalized_image_feat = feat / np.linalg.norm(feat)
+            similarities = np.dot(normalized_image_feat, keyword_features_np.T)
+            
+            best_category_idx = np.argmax(similarities)
+            best_similarity = similarities[best_category_idx]
+            best_category_name = keyword_categories[best_category_idx]
+
+            if best_similarity >= keyword_classification_threshold:
+                # フォルダ名として適切な形に整形
+                clean_category_name = best_category_name.replace(" ", "_").replace("/", "_").replace("\\", "_")
+                label_key = f"KW_{clean_category_name}"
+                # label_key = f"KW_{clean_category_name}_sim{best_similarity:.2f}"
+                
+                # final_labelsに割り当てるためのユニークなIDを生成
+                if label_key not in final_cluster_names:
+                    final_cluster_names[label_key] = label_key # フォルダ名として使う
+                
+                final_labels[original_img_idx] = label_key
+                classified_by_keyword_mask[i] = True
+            
+            if (i + 1) % 10 == 0 or (i + 1) == len(features_all_np):
+                sys.stdout.write(f"\r進捗 (キーワード分類): {i+1}/{len(features_all_np)}")
+                sys.stdout.flush()
+        print("\nキーワード分類完了。")
+
+        # 3. キーワード分類されなかった画像をK-Meansでクラスタリング
+        unclassified_features_np = features_all_np[~classified_by_keyword_mask]
+        unclassified_original_indices = [original_idx_map[i] for i in np.where(~classified_by_keyword_mask)[0]]
+
+        if len(unclassified_features_np) > 0:
+            print(f"\nキーワード分類されなかった画像 ({len(unclassified_features_np)}枚) をK-Meansでクラスタリング中...")
+
+            min_k = int(len(unclassified_features_np) / 1000)
+            max_k = int(len(unclassified_features_np) / 100)
+            if min_k < 8: min_k = 10
+            elif min_k > 30: min_k = 30
             if max_k > 30: max_k = 30
             elif max_k <= min_k + 4: max_k = min_k + 4
-            print(f"→ クラスタ数の範囲: {min_k} 〜 {max_k}")
-            best_k = find_best_k(features_np, k_range=range(min_k, max_k))
-            print(f"→ 最適なクラスタ数は {best_k}")
-        else:
-            best_k = args.k
-            print(f"クラスタ数 (手動指定): {best_k}")
+            
+            print(f"→ K-Meansクラスタ数の範囲: {min_k} 〜 {max_k}")
+            
+            best_k_for_kmeans = find_best_k(unclassified_features_np, k_range=range(min_k, max_k))
+            print(f"→ K-Meansの最適なクラスタ数は {best_k_for_kmeans}")
 
-        kmeans = KMeans(n_clusters=best_k, random_state=0, n_init='auto')
-        kmeans_labels = kmeans.fit_predict(features_np)
-        # kmeans_cluster_names = describe_clusters_simple(features_np, processed_image_paths_for_clustering, kmeans_labels, kmeans)
-        # describe_clusters に clip_model と clip_tokenizer を渡す
-        kmeans_cluster_names = describe_clusters(
-            kmeans_labels, 
-            kmeans,
-            model,          # CLIPモデルを渡す
-            open_clip.get_tokenizer('ViT-B-32') # トークナイザーをここで取得して渡す
-        )
+            if best_k_for_kmeans > 0: # クラスタリング可能な場合
+                kmeans = KMeans(n_clusters=best_k_for_kmeans, random_state=0, n_init='auto')
+                kmeans_labels_unclassified = kmeans.fit_predict(unclassified_features_np)
+                
+                # K-Meansクラスタにキーワードベースの命名
+                kmeans_cluster_names = describe_clusters(
+                    kmeans_labels_unclassified, 
+                    kmeans, 
+                    model, 
+                    clip_tokenizer, 
+                    unclassified_features_np # features_for_kmeans を渡す
+                )
 
-        # 全ての画像パスに対応するlabelsリストを構築
-        labels = np.full(len(image_paths), -1, dtype=int) # 全体を-1 (Unknown)で初期化
-        current_unknown_label_id = max(kmeans_cluster_names.keys()) + 1 if kmeans_cluster_names else 0
-        kmeans_cluster_names[current_unknown_label_id] = "Unknown_Error" # Unknownカテゴリを追加
+                # K-Meansのラベルを最終的なラベルリストにマッピング
+                # K-Meansのラベルとキーワード分類のラベルが重複しないように、ユニークなキーを生成
+                for i, kmeans_label in enumerate(kmeans_labels_unclassified):
+                    original_img_idx = unclassified_original_indices[i]
+                    kmeans_cluster_key = f"KMeans_{kmeans_label}_{kmeans_cluster_names[kmeans_label]}" # ユニークなキー
+                    
+                    if kmeans_cluster_key not in final_cluster_names:
+                        final_cluster_names[kmeans_cluster_key] = kmeans_cluster_names[kmeans_label]
+                    
+                    final_labels[original_img_idx] = kmeans_cluster_key
+            else:
+                print("警告: 残りの画像数が少なすぎるため、K-Meansクラスタリングは行われませんでした。")
 
-        for idx, cluster_label in zip(processed_indices, kmeans_labels):
-            labels[idx] = cluster_label # 処理された画像にはK-Meansのラベルを割り当てる
-        
-        # 処理されなかった画像（-1のままの画像）にUnknown_Errorラベルを割り当てる
-        for i in range(len(labels)):
-            if labels[i] == -1:
-                labels[i] = current_unknown_label_id
-        
-        cluster_names = kmeans_cluster_names # K-Meansのクラスタ名とUnknown_Errorを追加したものを最終的なcluster_namesとする
-        output_dir = "clusters_by_clip"
-       
+        # 4. 処理されなかった画像 (Noneのままの画像) にUnknown_Errorラベルを割り当てる
+        for i in range(len(final_labels)):
+            if final_labels[i] == -1: # まだ分類されていない画像
+                final_labels[i] = unknown_label_key # Unknown_Error_System_Key を割り当てる
+
+        labels = final_labels
+        cluster_names = final_cluster_names
+        output_dir = "clusters_by_hybrid_clip"
+
     elif check_size_rule: # 固定閾値でサイズ分類
         print("\n固定閾値でサイズ分類中...")
         labels, cluster_names = assign_fixed_size_labels(image_paths)
-        if len(set(labels)) <= 1: # 分類が機能しなかった場合（すべて同じカテゴリなど）
-            print("警告: 固定閾値による分類が効果的ではありませんでした。")
+        if len(set(labels)) <= 1 and "Unknown_Error" not in cluster_names.values():
+             print("警告: 固定閾値による分類が効果的ではありませんでした（すべての画像が同じカテゴリかもしれません）。")
         output_dir = "clusters_by_size"
 
-    else: # どちらの分類も指定されていない場合
-        print("エラー: 分類方法 (--use-picture または --use-size-rule) を指定してください。")
+    else: # ここには到達しないはずだが念のため
+        print("エラー: 分類方法が指定されていません。")
         return
 
-    print("\n画像をクラスタごとに移動中...")
+    print("\n画像をカテゴリごとに移動中...")
     os.makedirs(output_dir, exist_ok=True)
     total = len(image_paths)
-    for i, path in enumerate(image_paths, 0): # iは0-indexed
-        label = labels[i]
-        name = cluster_names.get(label, "Unknown_Category_Fallback") # 念のためデフォルトも
+    for i, path in enumerate(image_paths, 0):
+        # labelが文字列キーになる可能性があるので、getで取得
+        label_key = labels[i] 
+        name = cluster_names.get(label_key, "Unknown_Category_Fallback")
         
         # ファイル名に使えない文字を置換
         name = name.replace(":", "_").replace("/", "_").replace("\\", "_").replace("*", "_").replace("?", "_").replace('"', '_').replace("<", "_").replace(">", "_").replace("|", "_")
@@ -442,11 +502,11 @@ def main():
             print(f"\nファイルの移動中にエラーが発生: {path} -> {new_path}: {e}")
             continue
         
-        if (i + 1) % 10 == 0 or (i + 1) == total: # プログレスバーの表示を修正
+        if (i + 1) % 10 == 0 or (i + 1) == total:
             sys.stdout.write(f"\r分類中: {i + 1}/{total} ({(i + 1) / total * 100:.2f}%)")
             sys.stdout.flush()
 
-    remove_empty_dirs(img_dir)  # 空のディレクトリを削除
+    remove_empty_dirs(img_dir)
 
     print(f"\n分類完了。{output_dir}/ フォルダ内を確認してください。")
 
