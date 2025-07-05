@@ -154,7 +154,114 @@ def find_best_k(features_np, k_range=range(10, 21)):
     return best_k
 
 # ラベルに名前をつける（中心ベクトルに最も近い画像のファイル名を参考に）
-def describe_clusters(features_np, image_paths, labels, kmeans):
+# describe_clusters 関数（変更案）
+def describe_clusters(labels, kmeans, clip_model, clip_tokenizer):
+    from sklearn.metrics import pairwise_distances_argmin_min
+    import torch
+    import hashlib
+    #
+    cluster_names = {}
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    clip_model.to(device)
+
+    # 事前に定義するキーワードリスト (例: ユーザーが期待するカテゴリや一般的な画像内容)
+    # これらをCLIPでエンコードし、画像特徴量と比較する
+    # あなたの画像群の内容に合わせて、このリストを調整してください
+    keywords = [
+        "a picture of a person",
+        "an outdoor landscape",
+        "a building",
+        "an animal",
+        "a close up of a face",
+        "a scene with many objects",
+        "a digital art illustration",
+        "a cartoon character",
+        "a professional photo",
+        "a blurred background",
+        "a text document",
+        "a screenshot",
+        "a natural scene",
+        "a city view",
+        "a food item",
+        "a vehicle",
+        "a plant or flower",
+        "a abstract image",
+        "a black and white photo",
+        "a vibrant colorful image",
+        # さらに具体的なキーワードを追加する
+        "an anime character",
+        "a game screenshot",
+        "a CD album cover",
+        "a travel destination",
+        "a glamour photo",
+        "a portrait",
+        "a group of people",
+        "a landscape with water",
+        "a mountain view",
+        "an indoor scene",
+        "a foot",
+        "a leg",
+        "a sole",
+        "a toe",
+        "a heel",
+        "a vagina",
+        "a penis",
+        "kissing",
+        "two or more women",
+        "a foot and a penis",
+        "an ugly face",
+        "a breast",
+        "a nipple",
+        "a butt",
+        "a face",
+        "a mouth",
+        "a mouth and penis",
+        "a face and penis",
+        "a girl",
+        "a shoe",
+        "a socks",
+        "a hand",
+        "a female body",
+        "a landscape"
+    ]
+    
+    # キーワードのCLIPテキスト特徴量を事前に計算
+    print("\nキーワードのCLIPテキスト特徴量を計算中...")
+    text_features = []
+    with torch.no_grad():
+        for kw in keywords:
+            text = clip_tokenizer(kw).to(device)
+            text_feat = clip_model.encode_text(text).cpu().numpy()[0]
+            text_features.append(text_feat / np.linalg.norm(text_feat)) # 正規化
+    text_features_np = np.array(text_features)
+    print("キーワード特徴量の計算完了。")
+
+    for i in range(kmeans.n_clusters):
+        indices = [j for j, label in enumerate(labels) if label == i]
+        if not indices:
+            cluster_names[i] = f"empty_cluster_{i}"
+            continue
+
+        cluster_center_feature = kmeans.cluster_centers_[i]
+        
+        # クラスタ中心と最も類似するキーワードを見つける
+        # cosine similarity (内積) を計算するために正規化が必要
+        normalized_cluster_center = cluster_center_feature / np.linalg.norm(cluster_center_feature)
+        
+        similarities = np.dot(normalized_cluster_center, text_features_np.T)
+        best_keyword_idx = np.argmax(similarities)
+        best_keyword_similarity = similarities[best_keyword_idx]
+        # キーワードから先頭の "a picture of ", "an " などを除去してクラスタ名にする
+        base_name = keywords[best_keyword_idx].replace("a picture of ", "").replace("an ", "").replace("a ", "").strip()
+
+        center_hash = hashlib.sha256(cluster_center_feature.tobytes()).hexdigest()
+        # フォルダ名として適切な形に整形 (例: スペースをアンダースコアに)
+        # 類似度も表示すると、ラベリングの信頼性が分かる
+        # ハッシュ値の一部をフォルダ名として使用（長すぎると不便なので、先頭8文字程度）
+        cluster_names[i] = f"{base_name.replace(' ', '_')}_sim{best_keyword_similarity:.2f}_{center_hash[:8]}"
+    return cluster_names
+
+def describe_clusters_simple(features_np, image_paths, labels, kmeans):
     import hashlib
     cluster_names = {}
     for i in range(kmeans.n_clusters):
@@ -273,8 +380,15 @@ def main():
 
         kmeans = KMeans(n_clusters=best_k, random_state=0, n_init='auto')
         kmeans_labels = kmeans.fit_predict(features_np)
-        kmeans_cluster_names = describe_clusters(features_np, processed_image_paths_for_clustering, kmeans_labels, kmeans)
-        
+        # kmeans_cluster_names = describe_clusters_simple(features_np, processed_image_paths_for_clustering, kmeans_labels, kmeans)
+        # describe_clusters に clip_model と clip_tokenizer を渡す
+        kmeans_cluster_names = describe_clusters(
+            kmeans_labels, 
+            kmeans,
+            model,          # CLIPモデルを渡す
+            open_clip.get_tokenizer('ViT-B-32') # トークナイザーをここで取得して渡す
+        )
+
         # 全ての画像パスに対応するlabelsリストを構築
         labels = np.full(len(image_paths), -1, dtype=int) # 全体を-1 (Unknown)で初期化
         current_unknown_label_id = max(kmeans_cluster_names.keys()) + 1 if kmeans_cluster_names else 0
