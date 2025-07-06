@@ -13,7 +13,7 @@ from collections import Counter, defaultdict
 # キー: 最終的なフォルダ名 (カテゴリ名)
 # 値: そのカテゴリを表すキーワードのリスト。最初のキーワードが代表として使われる。
 # キーワードの定義
-KEYWORDS_FOR_CLASSIFICATION = {
+KEYWORDS_FOR_CLASSIFICATION2 = {
             "Landscape": ["an outdoor landscape", "a natural scene", "a mountain view"],
             #"Person": ["a picture of a person", "a portrait", "a group of people"],
             "Building": ["a building", "a city view", "architecture"],
@@ -39,53 +39,60 @@ KEYWORDS_FOR_CLASSIFICATION = {
             "body" :["female body","a breast", "a nipple", "a butt"],
             "chu": ["kissing"]
 }
-KEYWORDS_FOR_CLASSIFICATION2 = {
-    "Landscape": ["an outdoor landscape", "a natural scene", "a mountain view", "a forest"],
-    "Person": ["a picture of a person", "a portrait", "a group of people", "a close up of a face"],
-    "Building": ["a building", "a city view", "an urban landscape", "architecture"],
-    "Animal": ["an animal", "a pet", "wildlife"],
-    "Art_Illustration": ["a digital art illustration", "a cartoon character", "an abstract image", "a painting"],
-    "Text_Document": ["a text document", "a screenshot", "a document with text"],
-    "Foot": ["a foot", "a leg", "a sole", "a toe", "a heel"],
-    "Genitals": ["a vagina", "a penis", "a breast", "a nipple", "a butt"],
-    "Face": ["a face", "an ugly face"],
-    "Mouth": ["a mouth", "a mouth and penis", "a face and penis"],
-    "Combined_Scenes": ["a foot and a penis", "kissing", "two or more women"], # 複合的なキーワード
-    "Object_Misc": ["a scene with many objects", "a food item", "a vehicle", "a shoe", "a socks", "a hand"],
-    "Other_Visual": ["a blurred background", "a black and white photo", "a vibrant colorful image", "a female body", "a girl"]
+KEYWORDS_FOR_CLASSIFICATION = {
+    # 自然・風景
+    "Landscape": ["an outdoor landscape", "a natural scene", "a mountain view", "a forest", "a beach", "a sunset", "a river", "a field", "a sky"],
+    "Nature_Elements": ["a flower", "a tree", "a plant", "clouds", "water", "a rock", "snow", "ice"],
+
+    # 人物関連
+    "Person_Portrait": ["a close up of a person", "a portrait", "a human face", "headshot of a person", "selfie"],
+    "Person_FullBody": ["a person standing", "a person walking", "a person sitting", "a person from behind", "multiple people", "a crowd"],
+    "Person_Action": ["a person running", "a person jumping", "a person dancing", "a person playing sports", "people interacting"],
+    
+    # 都市・建築
+    "Building": ["a building", "a city view", "an urban landscape", "architecture", "a house", "a skyscraper", "a bridge", "a street", "an interior of a building"],
+    "Vehicle": ["a car", "a truck", "a motorcycle", "an airplane", "a train", "a boat", "a bicycle"], # 乗り物を独立カテゴリに
+
+    # 動物
+    "Animal": ["an animal", "a pet", "wildlife", "a dog", "a cat", "a bird", "a fish", "an insect"],
+
+    # アート・デザイン
+    "Art_Illustration": ["a digital art illustration", "a cartoon character", "an abstract image", "a painting", "a drawing", "a sculpture", "a graphic design", "a sketch"],
+    "Text_Document": ["a text document", "a screenshot", "a document with text", "a book page", "a sign with text", "a newspaper"],
+
+    # 物体・その他
+    "Food_Drink": ["a food item", "a dish", "fruit", "vegetables", "a drink", "a meal", "dessert"], # 食べ物を独立カテゴリに
+    "Object_Household": ["furniture", "a chair", "a table", "a bed", "kitchenware", "home decor"], # 家庭用品を追加
+    "Object_Misc": ["a scene with many objects", "a tool", "electronics", "a bag", "clothes", "a shoe", "a socks", "a hand", "money"],
+    
+    # NSFW 
+    "Adult_Nudity": ["a nude body", "exposed breasts", "genitals", "a naked person", "pornographic image", "explicit content", "sexual act"],
+    "Adult_Implied": ["implied nudity", "suggestive pose", "lingerie", "revealing clothing", "buttocks", "cleavage"],
+    
+    # その他視覚的特徴
+    "Abstract_Pattern": ["an abstract pattern", "a texture", "a blurry image", "a background", "a design"], # 抽象的なものやパターン
+    "Black_White": ["a black and white photo", "monochrome image"],
+    "Vibrant_Color": ["a vibrant colorful image", "a colorful abstract"],
+    "Blurred_Image": ["a blurred image", "out of focus background"],
+    "Watermark_Overlay": ["an image with a watermark", "text overlay on image"], # ウォーターマークなども識別
+    "Other_Visual": ["a strange image", "a distorted image", "a placeholder image", "an empty image"] # どうしても分類できないもの
 }
 
-# describe_kmeans_clusters (K-Meansクラスタ命名用) で使用するキーワードのフラットリスト
-# 上記の辞書のすべての値を結合して作成
 KEYWORDS_FOR_KMEANS_NAMING = [item for sublist in KEYWORDS_FOR_CLASSIFICATION.values() for item in sublist]
 
-# ハイブリッド分類におけるキーワード分類の類似度閾値
 KEYWORD_CLASSIFICATION_THRESHOLD = 0.25
 
-# 特徴量データ出力ファイル名
 FEATURE_LOG_FILENAME = "image_features_log.npy"
 
 # --- 2. ヘルパー関数群 ---
 
 def get_image_paths(img_dirs, recursive=False):
-    """
-    指定されたディレクトリから画像ファイルのパスを再帰的に取得します。
-
-    Args:
-        img_dirs (list): 画像を検索するディレクトリパスのリスト。
-        recursive (bool): サブディレクトリを再帰的に検索するかどうか。
-
-    Returns:
-        list: 見つかった画像ファイルのパスのリスト。
-    """
     exts = ('.jpg', '.png', '.jpeg', '.gif', '.bmp', '.tiff', '.webp')
     image_paths = []
-
     for img_dir in img_dirs:
         if not os.path.isdir(img_dir):
             print(f"警告: ディレクトリ '{img_dir}' が見つかりません。スキップします。", file=sys.stderr)
             continue
-
         if recursive:
             for root, _, files in os.walk(img_dir):
                 for file in files:
@@ -98,12 +105,6 @@ def get_image_paths(img_dirs, recursive=False):
     return image_paths
 
 def remove_empty_dirs(root_dir):
-    """
-    指定されたルートディレクトリ以下の空のディレクトリを削除します。
-
-    Args:
-        root_dir (str): 削除対象のルートディレクトリ。
-    """
     for current_dir, dirs, files in os.walk(root_dir, topdown=False):
         if not dirs and not files:
             try:
@@ -115,23 +116,32 @@ def remove_empty_dirs(root_dir):
 # --- 3. ImageSorter クラス定義 ---
 
 class ImageSorter:
-    def __init__(self, clip_model_name='ViT-B-32', pretrained_dataset='laion2b_s34b_b79k'):
+    def __init__(self, clip_model_name='ViT-B-32', pretrained_dataset='laion2b_s34b_b79k', feature_mode='full'):
+        # feature_mode: 'full' (CLIPロードと特徴量抽出), 'load_only' (CLIPロードのみ、特徴量抽出はしない), 'none' (CLIPロードしない)
         self.device = "cuda" if "cuda" in sys.modules and torch.cuda.is_available() else "cpu"
         self.model = None
         self.preprocess = None
         self.clip_model_name = clip_model_name
         self.pretrained_dataset = pretrained_dataset
         self.clip_tokenizer = None
+        self.feature_mode = feature_mode
 
         self.keyword_classification_map = {}
         self.keyword_categories = []
         self.keyword_features_np = None
         self.kmeans_naming_text_features_np = None
         
+        if self.feature_mode != 'none': # CLIP関連の処理が必要な場合のみロードを試みる
+            self._ensure_clip_loaded()
+
     def _ensure_clip_loaded(self):
         """CLIPモデルがロードされていることを確認し、必要ならロードします。"""
         if self.model is None:
-            print(f"CLIPモデル ({self.clip_model_name}, {self.pretrained_dataset}) をロード中...")
+            if self.feature_mode == 'load_only':
+                print(f"CLIPモデル ({self.clip_model_name}, {self.pretrained_dataset}) をロード中 (特徴量抽出はスキップ)...")
+            else: # feature_mode == 'full'
+                print(f"CLIPモデル ({self.clip_model_name}, {self.pretrained_dataset}) をロード中...")
+            
             # 遅延インポート
             import torch
             import open_clip
@@ -172,16 +182,21 @@ class ImageSorter:
         print(f"K-Means命名用キーワード {len(KEYWORDS_FOR_KMEANS_NAMING)}個の特徴量準備完了。")
 
 
-    def extract_features(self, image_paths):
+    def extract_features(self, image_paths, pre_extracted_features=None):
         """
-        画像パスのリストからCLIP特徴量を抽出し、正常に処理された画像の元のインデックスを返します。
+        画像パスのリストからCLIP特徴量を抽出、または事前抽出された特徴量を利用します。
         """
-        self._ensure_clip_loaded() # CLIPモデルのロードを保証
+        if pre_extracted_features is not None:
+            print("事前抽出された特徴量を使用します。")
+            features = [item['feature'] for item in pre_extracted_features]
+            processed_indices = list(range(len(features)))
+            return np.array(features), processed_indices
+        
+        self._ensure_clip_loaded()
 
         features = []
         processed_indices = []
         
-        # 遅延インポート
         from PIL import Image
         import torch
 
@@ -212,12 +227,7 @@ class ImageSorter:
         return features_np, processed_indices
 
     def assign_fixed_size_labels(self, image_paths):
-        """
-        画像サイズに基づいて画像を分類します。
-        """
-        # 遅延インポート
         from PIL import Image
-
         labels = [None] * len(image_paths)
         cluster_names = {}
         
@@ -305,28 +315,18 @@ class ImageSorter:
         return np.array(labels), cluster_names
 
     def find_best_k(self, features_np, k_range=range(10, 21)):
-        """最適なK-Meansクラスタ数をシルエットスコアに基づいて決定します。"""
-        # 遅延インポート
         from sklearn.cluster import KMeans
         from sklearn.metrics import silhouette_score
-
         best_score = -1
         best_k = 2
-        if len(features_np) < 2:
-            return 1 
-        
-        if len(features_np) < k_range.stop:
-            k_range = range(k_range.start, max(2, len(features_np) + 1))
-        
-        if k_range.start >= len(features_np):
-            return max(1, len(features_np) // 2)
-
+        if len(features_np) < 2: return 1
+        if len(features_np) < k_range.stop: k_range = range(k_range.start, max(2, len(features_np) + 1))
+        if k_range.start >= len(features_np): return max(1, len(features_np) // 2)
         for k in k_range:
             try:
                 kmeans = KMeans(n_clusters=k, random_state=0, n_init=10)
                 labels = kmeans.fit_predict(features_np)
-                if len(set(labels)) < 2 or len(set(labels)) > len(features_np):
-                    continue
+                if len(set(labels)) < 2 or len(set(labels)) > len(features_np): continue
                 score = silhouette_score(features_np, labels)
                 if score > best_score:
                     best_score = score
@@ -337,72 +337,51 @@ class ImageSorter:
         return best_k if best_k > 0 else max(2, len(features_np) // 5)
 
     def describe_kmeans_clusters(self, kmeans_labels, kmeans_model, features_for_kmeans):
-        """K-Meansクラスタにキーワードベースの命名を行います。"""
         cluster_names = {}
-        
         for i in range(kmeans_model.n_clusters):
             indices_in_kmeans_data = np.where(kmeans_labels == i)[0]
             if not indices_in_kmeans_data.size:
                 cluster_names[i] = f"empty_cluster_{i}"
                 continue
-
             cluster_center_feature = kmeans_model.cluster_centers_[i]
-            
             normalized_cluster_center = cluster_center_feature / np.linalg.norm(cluster_center_feature)
-            
             similarities = np.dot(normalized_cluster_center, self.kmeans_naming_text_features_np.T)
             sorted_indices = np.argsort(similarities)[::-1]
-            
-            best_keyword_idx_1 = sorted_indices[0]
-            best_keyword_idx_2 = sorted_indices[1]
-            
-            best_keyword_1 = KEYWORDS_FOR_KMEANS_NAMING[best_keyword_idx_1]
-            best_keyword_2 = KEYWORDS_FOR_KMEANS_NAMING[best_keyword_idx_2]
-            
+            best_keyword_1 = KEYWORDS_FOR_KMEANS_NAMING[sorted_indices[0]]
+            best_keyword_2 = KEYWORDS_FOR_KMEANS_NAMING[sorted_indices[1]]
             base_name_1 = best_keyword_1.replace("a picture of ", "").replace("an ", "").replace("a ", "").strip()
             base_name_2 = best_keyword_2.replace("a picture of ", "").replace("an ", "").replace("a ", "").strip()
-            
             center_hash = hashlib.sha256(cluster_center_feature.tobytes()).hexdigest()
-
             cluster_names[i] = (
                 f"{base_name_1.replace(' ', '_')}_{base_name_2.replace(' ', '_')}_id{center_hash[:8]}"
             )
-            
         return cluster_names
-
-    def run_hybrid_classification(self, image_paths, args_k):
-        """
-        キーワード分類後に残りをK-Meansで分類するハイブリッドモードを実行します。
-        """
-        # 遅延インポート
+    
+    def run_hybrid_classification(self, image_paths, args_k, pre_extracted_features=None):
         from sklearn.cluster import KMeans
         import torch
-
         print("\nハイブリッド分類 (キーワード & K-Means) を実行中...")
         
-        # 特徴量抽出
-        features_all_np, processed_indices_all = self.extract_features(image_paths)
+        features_all_np, processed_indices_all = self.extract_features(image_paths, pre_extracted_features)
         if len(features_all_np) == 0:
             print("処理できる画像がありません。終了します。", file=sys.stderr)
-            return np.array([]), {}, [] # 特徴量ログのために空のリストも返す
+            return np.array([]), {}, []
 
         original_idx_map = {idx_in_features: original_img_idx for idx_in_features, original_img_idx in enumerate(processed_indices_all)}
 
         final_labels = np.full(len(image_paths), None, dtype=object)
         final_cluster_names = {}
-        processed_image_features = [None] * len(image_paths) # 特徴量ログ用のリスト
+        processed_image_features_for_log = [None] * len(image_paths) 
         
-        # 未処理の画像用の"Unknown_Error"カテゴリを定義
         unknown_label_key = "Unknown_Error_System_Key" 
         final_cluster_names[unknown_label_key] = "Unknown_Error"
 
-        # 1. キーワードによる直接分類
         print("\nキーワードに最も近い画像を分類中...")
         classified_by_keyword_mask = np.zeros(len(features_all_np), dtype=bool) 
         
         for i, feat in enumerate(features_all_np):
             original_img_idx = original_idx_map[i]
-            processed_image_features[original_img_idx] = feat # 特徴量を保存
+            processed_image_features_for_log[original_img_idx] = feat 
             
             normalized_image_feat = feat / np.linalg.norm(feat)
             similarities = np.dot(normalized_image_feat, self.keyword_features_np.T)
@@ -413,7 +392,6 @@ class ImageSorter:
 
             if best_similarity >= KEYWORD_CLASSIFICATION_THRESHOLD:
                 clean_category_name = best_category_name.replace(" ", "_").replace("/", "_").replace("\\", "_")
-                # フォルダ名に類似度を含めない
                 label_key = f"KW_{clean_category_name}" 
                 
                 if label_key not in final_cluster_names:
@@ -427,7 +405,6 @@ class ImageSorter:
                 sys.stdout.flush()
         print("\nキーワード分類完了。")
 
-        # 2. キーワード分類されなかった画像をK-Meansでクラスタリング
         unclassified_features_np = features_all_np[~classified_by_keyword_mask]
         unclassified_original_indices = [original_idx_map[i] for i in np.where(~classified_by_keyword_mask)[0]]
 
@@ -467,24 +444,18 @@ class ImageSorter:
             else:
                 print("警告: 残りの画像数が少なすぎるため、K-Meansクラスタリングは行われませんでした。", file=sys.stderr)
 
-        # 3. 未分類の画像をUnknown_Errorに割り当てる (Noneのままの画像)
         for i in range(len(final_labels)):
             if final_labels[i] is None:
                 final_labels[i] = unknown_label_key
 
-        return final_labels, final_cluster_names, processed_image_features
+        return final_labels, final_cluster_names, processed_image_features_for_log
 
-    def run_kmeans_only_classification(self, image_paths, args_k):
-        """
-        K-Meansのみで画像を分類します。
-        """
-        # 遅延インポート
+    def run_kmeans_only_classification(self, image_paths, args_k, pre_extracted_features=None):
         from sklearn.cluster import KMeans
         import torch
-
         print("\nK-Meansのみでクラスタリング中...")
         
-        features_np, processed_indices = self.extract_features(image_paths)
+        features_np, processed_indices = self.extract_features(image_paths, pre_extracted_features)
         if len(features_np) == 0:
             print("処理できる画像がありません。終了します。", file=sys.stderr)
             return np.array([]), {}, []
@@ -494,7 +465,7 @@ class ImageSorter:
         min_k_val = int(len(features_np) / 1000)
         max_k_val = int(len(features_np) / 100)
         if min_k_val < 8: min_k_val = 10
-        elif min_k_val > 30: min_k_val = 30
+        elif min_k_val > 30: max_k_val = 30
         if max_k_val > 30: max_k_val = 30
         elif max_k_val <= min_k_val + 4: max_k_val = min_k_val + 4
         
@@ -505,7 +476,7 @@ class ImageSorter:
 
         final_labels = np.full(len(image_paths), None, dtype=object)
         final_cluster_names = {}
-        processed_image_features = [None] * len(image_paths) # 特徴量ログ用のリスト
+        processed_image_features_for_log = [None] * len(image_paths) 
         
         unknown_label_key = "Unknown_Error_System_Key" 
         final_cluster_names[unknown_label_key] = "Unknown_Error"
@@ -522,8 +493,8 @@ class ImageSorter:
 
             for i, kmeans_label in enumerate(kmeans_labels):
                 original_img_idx = original_idx_map[i]
-                processed_image_features[original_img_idx] = features_np[i] # 特徴量を保存
-                kmeans_cluster_key = f"KMeans_{kmeans_cluster_names[kmeans_label]}"
+                processed_image_features_for_log[original_img_idx] = features_np[i] 
+                kmeans_cluster_key = f"KMeans_{kmeans_label}_{kmeans_cluster_names[kmeans_label]}"
                 
                 if kmeans_cluster_key not in final_cluster_names:
                     final_cluster_names[kmeans_cluster_key] = kmeans_cluster_names[kmeans_label]
@@ -532,47 +503,30 @@ class ImageSorter:
         else:
             print("警告: 画像数が少なすぎるため、K-Meansクラスタリングは行われませんでした。", file=sys.stderr)
         
-        # 未分類の画像をUnknown_Errorに割り当てる
         for i in range(len(final_labels)):
             if final_labels[i] is None:
                 final_labels[i] = unknown_label_key
 
-        return final_labels, final_cluster_names, processed_image_features
+        return final_labels, final_cluster_names, processed_image_features_for_log
 
     def run_size_classification(self, image_paths):
-        """
-        画像サイズに基づいて画像を分類します。
-        このモードではCLIP特徴量を使用しないため、特徴量ログは空になります。
-        """
         print("\n固定閾値でサイズ分類中...")
         labels, cluster_names = self.assign_fixed_size_labels(image_paths)
         if len(set(labels)) <= 1 and "Unknown_Error_Size" not in cluster_names.values():
              print("警告: 固定閾値による分類が効果的ではありませんでした（すべての画像が同じカテゴリかもしれません）。", file=sys.stderr)
-        
-        # サイズ分類では特徴量を抽出しないため、空のリストを返す
         return labels, cluster_names, [None] * len(image_paths)
 
-
     def organize_images(self, image_paths, labels, cluster_names, processed_image_features, output_dir):
-        """
-        分類結果に基づいて画像をフォルダに移動し、特徴量データをファイル出力します。
-        """
         print(f"\n画像をカテゴリごとに移動中... 出力先: {output_dir}/")
         os.makedirs(output_dir, exist_ok=True)
         total = len(image_paths)
-
-        # 特徴量ログデータを格納するリスト
         feature_log_data = []
-
         for i, path in enumerate(image_paths, 0):
             label_key = labels[i] 
             name = cluster_names.get(label_key, "Unknown_Category_Fallback")
-            
-            # ファイル名に使えない文字を置換
             name = name.replace(":", "_").replace("/", "_").replace("\\", "_").replace("*", "_").replace("?", "_").replace('"', '_').replace("<", "_").replace(">", "_").replace("|", "_")
             dest = os.path.join(output_dir, name)
             os.makedirs(dest, exist_ok=True)
-
             try:
                 base_name = os.path.basename(path)
                 new_path = os.path.join(dest, base_name)
@@ -581,33 +535,24 @@ class ImageSorter:
                     name_parts = os.path.splitext(base_name)
                     new_path = os.path.join(dest, f"{name_parts[0]}_{counter}{name_parts[1]}")
                     counter += 1
-                
                 os.rename(path, new_path)
-
-                # 移動後の新しいパスと特徴量をログに追加
                 if processed_image_features[i] is not None:
                     feature_log_data.append({
                         'filepath': new_path,
                         'feature': processed_image_features[i]
                     })
-
             except Exception as e:
                 print(f"\nファイルの移動中にエラーが発生: {path} -> {new_path}: {e}", file=sys.stderr)
-                # エラー発生時でも、特徴量が取得できていればログに追加
                 if processed_image_features[i] is not None:
                     feature_log_data.append({
-                        'filepath': new_path, # 移動に失敗しても、意図した新しいパスを記録
+                        'filepath': new_path,
                         'feature': processed_image_features[i]
                     })
                 continue
-            
             if (i + 1) % 10 == 0 or (i + 1) == total:
                 sys.stdout.write(f"\r分類中: {i + 1}/{total} ({(i + 1) / total * 100:.2f}%)")
                 sys.stdout.flush()
-
         print(f"\n分類完了。{output_dir}/ フォルダ内を確認してください。")
-
-        # 特徴量データをファイルに出力
         if feature_log_data:
             np.save(FEATURE_LOG_FILENAME, np.array(feature_log_data, dtype=object))
             print(f"特徴量データを '{FEATURE_LOG_FILENAME}' に保存しました。")
@@ -619,15 +564,20 @@ class ImageSorter:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="画像分類ツール:画像ファイルをフォルダに振り分ける。デフォルトはハイブリッド分類。",
-        formatter_class=argparse.RawTextHelpFormatter # ヘルプメッセージの整形を保持
+        description="画像分類ツール:画像ファイルをフォルダに振り分ける。デフォルトはハイブリッド分類。\n"
+                    "特徴量ファイルからの再分類 (--reclassify) もサポート。",
+        formatter_class=argparse.RawTextHelpFormatter
     )
+    # 通常のディレクトリ指定（再分類モードでは使用しない）
     parser.add_argument('img_dirs', metavar='DIR', type=str, nargs='*', default=['.'],
-                        help='画像フォルダのパス（複数指定可、デフォルト: カレントディレクトリ）\n例: python script.py ./my_photos /mnt/data/images')
+                        help='画像フォルダのパス（複数指定可、デフォルト: カレントディレクトリ）\n'
+                             '再分類モードではこの引数は無視されます。\n'
+                             '例: python script.py ./my_photos /mnt/data/images')
+    
     parser.add_argument('--max', type=int, default=100000,
-                        help='読み込む画像の最大枚数（デフォルト: 100000）')
+                        help='読み込む/処理する画像の最大枚数（デフォルト: 100000）')
     parser.add_argument('--recursive', '-r', action='store_true',
-                        help='サブフォルダも再帰的に検索する場合は指定')
+                        help='サブフォルダも再帰的に検索する場合は指定（通常モードのみ）')
     parser.add_argument('--size', action='store_true',
                         help='サイズ分類する場合は指定')
     parser.add_argument('--kmeans-only', action='store_true', dest='kmeans_only',
@@ -635,50 +585,123 @@ def main():
     parser.add_argument('--k', '-k', type=int, default=None,
                         help='K-Meansのクラスタ数を手動で指定する場合（デフォルト: 自動判定）')
     
-    args = parser.parse_args()
-    img_dirs = args.img_dirs
-    n_max = args.max
-    recursive = args.recursive
+    # 再分類用オプション
+    parser.add_argument('--reclassify', action='store_true',
+                        help='保存された特徴量データから画像を再分類します。このオプションを使用すると、DIR引数は無視されます。')
+    parser.add_argument('--feature-file', type=str, default=FEATURE_LOG_FILENAME,
+                        help=f'再分類時に読み込む特徴量データファイル（デフォルト: {FEATURE_LOG_FILENAME}）。\n'
+                             f'--reclassify と併用します。')
+    parser.add_argument('--output-suffix', type=str, default='_reclassified',
+                        help='再分類時の出力フォルダ名に付加するサフィックス（デフォルト: _reclassified）。\n'
+                             '--reclassify と併用します。')
     
-    print("Searching for images in the specified directories...")
-    sys.stdout.flush()
-    image_paths = get_image_paths(img_dirs, recursive)
-
-    if not image_paths:
-        print("エラー: 指定されたフォルダに画像が見つかりませんでした。", file=sys.stderr)
-        return
-
-    print(f"画像フォルダにある画像の総数: {len(image_paths)}")
-
-    if len(image_paths) > n_max:
-        print(f"画像が多すぎるため、最初の{n_max}枚のみを使用します。")
-        image_paths = image_paths[:n_max]
-
-    sorter = ImageSorter() # ImageSorterインスタンスを作成
+    args = parser.parse_args()
 
     labels = np.array([])
     cluster_names = {}
     processed_image_features = [] # 特徴量ログ用のデータ
     output_dir = "" 
+    
+    if args.reclassify:
+        # --- 再分類モード ---
+        feature_file = args.feature_file
+        print(f"再分類モード: 特徴量ファイル '{feature_file}' を読み込み中...")
+        if not os.path.exists(feature_file):
+            print(f"エラー: 特徴量ファイル '{feature_file}' が見つかりません。", file=sys.stderr)
+            return
 
-    if args.size:
-        labels, cluster_names, processed_image_features = sorter.run_size_classification(image_paths)
-        output_dir = "clusters_by_size"
-    elif args.kmeans_only:
-        labels, cluster_names, processed_image_features = sorter.run_kmeans_only_classification(image_paths, args.k)
-        output_dir = "clusters_by_kmeans_only"
-    else: # デフォルト動作: ハイブリッドモード
-        labels, cluster_names, processed_image_features = sorter.run_hybrid_classification(image_paths, args.k)
-        output_dir = "clusters_by_hybrid_clip"
+        try:
+            loaded_data = np.load(feature_file, allow_pickle=True)
+        except Exception as e:
+            print(f"エラー: 特徴量ファイルの読み込みに失敗しました: {e}", file=sys.stderr)
+            return
 
-    # 画像の移動と特徴量ログの保存
-    sorter.organize_images(image_paths, labels, cluster_names, processed_image_features, output_dir)
+        if not loaded_data.size > 0:
+            print("エラー: 読み込んだ特徴量データが空です。", file=sys.stderr)
+            return
 
-    # 処理元ディレクトリの空ディレクトリを削除
-    for img_dir in img_dirs:
-        remove_empty_dirs(img_dir)
+        print(f"読み込んだ特徴量データ数: {len(loaded_data)}")
+
+        # 既存のパスと特徴量を準備
+        image_paths = [item['filepath'] for item in loaded_data]
+        features_from_log = [item['feature'] for item in loaded_data]
+
+        if len(image_paths) > args.max:
+            print(f"画像が多すぎるため、最初の{args.max}枚のみを使用します。")
+            image_paths = image_paths[:args.max]
+            features_from_log = features_from_log[:args.max]
+        
+        # サイズ分類は特徴量を必要としないため、再分類モードでは非対応（意味がないため）
+        if args.size:
+            print("警告: --reclassify モードでは --size 分類はサポートされていません。通常モードで実行してください。", file=sys.stderr)
+            return
+
+        # ImageSorterを、CLIPモデルをロードしてキーワード特徴量を準備するが、画像からの特徴量抽出はしないモードで初期化
+        sorter = ImageSorter(feature_mode='load_only')
+
+        if args.kmeans_only:
+            labels, cluster_names, processed_image_features = sorter.run_kmeans_only_classification(
+                image_paths, args.k, pre_extracted_features=loaded_data # loaded_dataをそのまま渡す
+            )
+            base_output_dir = "clusters_by_kmeans_only"
+        else: # デフォルト動作: ハイブリッドモード
+            labels, cluster_names, processed_image_features = sorter.run_hybrid_classification(
+                image_paths, args.k, pre_extracted_features=loaded_data # loaded_dataをそのまま渡す
+            )
+            base_output_dir = "clusters_by_hybrid_clip"
+
+        output_dir = f"{base_output_dir}{args.output_suffix}"
+
+    else:
+        # --- 通常の分類モード (特徴量抽出から開始) ---
+        img_dirs = args.img_dirs
+        n_max = args.max
+        recursive = args.recursive
+
+        print("Searching for images in the specified directories...")
+        sys.stdout.flush()
+        image_paths = get_image_paths(img_dirs, recursive)
+
+        if not image_paths:
+            print("エラー: 指定されたフォルダに画像が見つかりませんでした。", file=sys.stderr)
+            return
+
+        print(f"画像フォルダにある画像の総数: {len(image_paths)}")
+
+        if len(image_paths) > n_max:
+            print(f"画像が多すぎるため、最初の{n_max}枚のみを使用します。")
+            image_paths = image_paths[:n_max]
+
+        # ImageSorterをフルモードで初期化（CLIPモデルロードと特徴量抽出）
+        sorter = ImageSorter(feature_mode='full') 
+
+        if args.size:
+            labels, cluster_names, processed_image_features = sorter.run_size_classification(image_paths)
+            output_dir = "clusters_by_size"
+        elif args.kmeans_only:
+            labels, cluster_names, processed_image_features = sorter.run_kmeans_only_classification(image_paths, args.k)
+            output_dir = "clusters_by_kmeans_only"
+        else: # デフォルト動作: ハイブリッドモード
+            labels, cluster_names, processed_image_features = sorter.run_hybrid_classification(image_paths, args.k)
+            output_dir = "clusters_by_hybrid_clip"
+        
+        # 通常モードの場合、処理元ディレクトリの空ディレクトリを削除
+        for img_dir in img_dirs:
+            remove_empty_dirs(img_dir)
+
+    # 画像の移動と特徴量ログの保存（両モードで共通）
+    if len(labels) > 0 and len(cluster_names) > 0:
+        sorter.organize_images(image_paths, labels, cluster_names, processed_image_features, output_dir)
+    else:
+        print("分類結果が空のため、画像の移動はスキップされました。", file=sys.stderr)
+
+    # 出力先ディレクトリ内の空ファイルを削除(reclassfyモードで以前の結果が移動されて空ディレクトリが残る可能性があるため)
+    if args.reclassify and output_dir:
+        remove_empty_dirs(output_dir)
 
     print("\nすべての処理が完了しました。")
 
 if __name__ == "__main__":
     main()
+    
+
