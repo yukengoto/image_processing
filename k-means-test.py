@@ -580,7 +580,7 @@ def main():
                         help='サブフォルダも再帰的に検索する場合は指定（通常モードのみ）')
     parser.add_argument('--size', action='store_true',
                         help='サイズ分類する場合は指定')
-    parser.add_argument('--kmeans-only', action='store_true', dest='kmeans_only',
+    parser.add_argument('--kmeans-only', '--km', action='store_true', dest='kmeans_only',
                         help='K-Meansのみで分類する場合は指定（CLIP特徴量を使用）')
     parser.add_argument('--k', '-k', type=int, default=None,
                         help='K-Meansのクラスタ数を手動で指定する場合（デフォルト: 自動判定）')
