@@ -14,12 +14,12 @@ from collections import Counter, defaultdict
 # 値: そのカテゴリを表すキーワードのリスト。最初のキーワードが代表として使われる。
 # キーワードの定義
 KEYWORDS_FOR_CLASSIFICATION2 = {
-            "Landscape": ["an outdoor landscape", "a natural scene", "a mountain view"],
+            #"Landscape": ["an outdoor landscape", "a natural scene", "a mountain view"],
             #"Person": ["a picture of a person", "a portrait", "a group of people"],
-            "Building": ["a building", "a city view", "architecture"],
+            #"Building": ["a building", "a city view", "architecture"],
             #"Animal": ["an animal", "a pet", "wildlife"],
             #"Art_Illustration": ["a digital art illustration", "a cartoon character", "an abstract image"],
-            "Text_Document": ["a text document", "a screenshot"],
+            #"Text_Document": ["a text document", "a screenshot"],
             #"Object_Misc": ["a scene with many objects", "a food item", "a vehicle", "a hand"],
             #"Anime": ["an anime character", "a game screenshot", "a CD album cover"],
             #"Other_Visual": ["a blurred background", "a black and white photo", "a vibrant colorful image"],
@@ -77,6 +77,8 @@ KEYWORDS_FOR_CLASSIFICATION = {
     "Watermark_Overlay": ["an image with a watermark", "text overlay on image"], # ウォーターマークなども識別
     "Other_Visual": ["a strange image", "a distorted image", "a placeholder image", "an empty image"] # どうしても分類できないもの
 }
+
+KEYWORDS_FOR_CLASSIFICATION.update(KEYWORDS_FOR_CLASSIFICATION2) # 追加のキーワードを統合
 
 KEYWORDS_FOR_KMEANS_NAMING = [item for sublist in KEYWORDS_FOR_CLASSIFICATION.values() for item in sublist]
 
