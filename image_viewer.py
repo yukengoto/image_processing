@@ -4,7 +4,8 @@ from PySide6.QtWidgets import (
     QTreeView, QListView, QPushButton, QLineEdit, QSplitter,
     QFileSystemModel # QFileDialog, 
 )
-from PySide6.QtCore import Qt, QDir
+from PySide6.QtCore import Qt, QDir, QFileInfo
+import os
 from PySide6.QtGui import QIcon # QAction, QIconはQtGuiのままでOKです
 
 
@@ -116,18 +117,48 @@ class FileBrowserWindow(QMainWindow):
                 # 例: self.process_image_file(file_path)
 
     def go_up_directory(self):
-        """親ディレクトリに移動する"""
+        """
+        親ディレクトリに移動します。
+        もし現在の場所がドライブのルートである場合、利用可能なドライブの一覧を表示します。
+        """
         current_index = self.list_view.rootIndex()
-        parent_index = self.model.parent(current_index)
-        if parent_index.isValid():
-            self.tree_view.setCurrentIndex(parent_index)
-            self.list_view.setRootIndex(parent_index)
-            self.path_edit.setText(self.model.filePath(parent_index))
-        elif current_index.data(Qt.DisplayRole) != self.model.rootPath():
-            # ルートパスまで戻った場合 (隠されたドライブレターなど考慮)
-            self.tree_view.setCurrentIndex(self.model.index(self.model.rootPath()))
-            self.list_view.setRootIndex(self.model.index(self.model.rootPath()))
-            self.path_edit.setText(self.model.rootPath())
+        current_path = self.model.filePath(current_index)
+
+        current_file_info = QFileInfo(current_path)
+        # 親ディレクトリのパス文字列を取得
+        parent_path = current_file_info.dir().absolutePath()
+
+        # 親パスが現在のパスと異なる場合 (通常のディレクトリ移動)
+        if parent_path != current_path:
+            parent_index = self.model.index(parent_path)
+            if parent_index.isValid():
+                # tree_view と list_view の両方を更新
+                self.tree_view.setCurrentIndex(parent_index)
+                self.list_view.setRootIndex(parent_index)
+                # パス表示も更新
+                self.path_edit.setText(self.model.filePath(parent_index))
+            else:
+                print(f"警告: 親パス '{parent_path}' の有効なインデックスを取得できませんでした。")
+        else:
+            # 親パスが現在のパスと同じ場合 (つまり、すでにルートディレクトリにいる場合)
+            if current_file_info.isRoot(): # 現在のパスが実際にルートディレクトリであるかを確認
+                # Windowsの場合、QFileSystemModel のルートを空文字列に設定すると、
+                # 自動的にすべての論理ドライブが列挙されます。
+                self.model.setRootPath("") # ⭐ ここでドライブ列挙をトリガー ⭐
+                
+                # UIの表示を「コンピューター」などのドライブ一覧モードに切り替える
+                root_index_for_drives = self.model.index("") # 空のパスはモデルのルート (ドライブ一覧) を指す
+                self.tree_view.setCurrentIndex(root_index_for_drives)
+                self.list_view.setRootIndex(root_index_for_drives)
+                
+                # パス表示を「コンピューター」や「マイコンピューター」など、
+                # ドライブ一覧を表すテキストに変更
+                self.path_edit.setText("コンピューター") # または "PC"、"ドライブ一覧" など
+                print("ドライブ一覧を表示します。")
+            else:
+                # Windowsの非ルートパスで親パスが同じになる特殊なケース（通常は発生しにくい）
+                # または、Linux/macOSでルートディレクトリ '/' にいる場合など
+                print(f"これ以上上位に移動できません: {current_path}")
 
 
 if __name__ == "__main__":
