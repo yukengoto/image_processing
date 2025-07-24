@@ -17,28 +17,30 @@ class FileBrowserWindow(QMainWindow):
 
         # --- モデルの作成 ---
         # QFileSystemModel は、ファイルシステムをツリー構造で表現するモデル
-        self.model = QFileSystemModel()
-        self.model.setRootPath(QDir.currentPath()) # 初期表示パスを設定 (例: 現在の作業ディレクトリ)
+        self.model_list = QFileSystemModel()
+        self.model_list.setRootPath(QDir.currentPath()) # 初期表示パスを設定 (例: 現在の作業ディレクトリ)
+        self.model_tree = QFileSystemModel()
+        self.model_tree.setRootPath("") # 初期表示パスを設定 (例: 空文字列は全ドライブを表示)
 
         # --- ビューの作成 ---
         # 1. ツリービュー (フォルダ階層)
         self.tree_view = QTreeView()
-        self.tree_view.setModel(self.model)
-        self.tree_view.setRootIndex(self.model.index(QDir.currentPath())) # モデルのルートインデックスを設定
+        self.tree_view.setModel(self.model_tree)
+        self.tree_view.setRootIndex(self.model_list.index("")) # モデルのルートインデックスを設定
         
         # フォルダのみを表示するようにフィルタリング (オプション)
-        # self.tree_view.setFilter(QDir.Dirs | QDir.NoDotAndDotDot) 
+        #self.tree_view.setFilter(QDir.Dirs | QDir.NoDotAndDotDot) 
         # self.model.setFilter(QDir.Dirs | QDir.NoDotAndDotDot) # ツリービューのモデルにフィルタを設定
         self.tree_view.setHeaderHidden(True) # ヘッダーを非表示にする (フォルダツリーには不要な場合が多い)
         
         # 不要な列を隠す (例: Size, Type, Date Modified)
         # QFileSystemModelの列のインデックスは決まっている (0:名前, 1:サイズ, 2:タイプ, 3:日付)
-        for i in range(1, self.model.columnCount()):
+        for i in range(1, self.model_tree.columnCount()):
             self.tree_view.hideColumn(i)
 
         # 2. リストビュー (選択されたフォルダの中身)
         self.list_view = QListView()
-        self.list_view.setModel(self.model) # 同じモデルを共有
+        self.list_view.setModel(self.model_list) # 同じモデルを共有
         
         # ファイルとフォルダの両方を表示
         #self.list_view.setFilter(QDir.AllEntries | QDir.NoDotAndDotDot)
@@ -91,22 +93,25 @@ class FileBrowserWindow(QMainWindow):
         self.up_button.clicked.connect(self.go_up_directory)
 
         # 初期表示のパスをリストビューにも反映
-        self.update_list_view(self.model.index(QDir.currentPath()))
+        #self.update_list_view(self.model_list.index(QDir.currentPath()))
 
 
-    def update_list_view(self, index):
+    def update_list_view(self, index_tree):
         """ツリービューで選択されたフォルダに基づいてリストビューを更新する"""
-        if index.isValid():
+        if index_tree.isValid():
             # リストビューのルートインデックスを、ツリービューで選択されたインデックスに設定
-            self.list_view.setRootIndex(index)
+            #self.list_view.setRootIndex(  index_tree)
+            dirpath = self.model_tree.filePath(index_tree) # ツリービューの選択されたパスを取得
+            self.model_list.setRootPath(dirpath) # モデルのルートパスを更新
+            self.list_view.setRootIndex(self.model_list.index(dirpath))
             # パス表示を更新
-            self.path_edit.setText(self.model.filePath(index))
+            self.path_edit.setText(dirpath)
 
     def handle_list_item_double_clicked(self, index):
         """リストビューでアイテムがダブルクリックされた際の処理"""
         if index.isValid():
-            file_path = self.model.filePath(index)
-            if self.model.isDir(index):
+            file_path = self.model_list.filePath(index)
+            if self.model_list.isDir(index):
                 # フォルダの場合、ツリービューとリストビューの両方をそのフォルダに更新
                 self.tree_view.setCurrentIndex(index) # ツリービューの選択も更新
                 self.list_view.setRootIndex(index)
@@ -122,7 +127,7 @@ class FileBrowserWindow(QMainWindow):
         もし現在の場所がドライブのルートである場合、利用可能なドライブの一覧を表示します。
         """
         current_index = self.list_view.rootIndex()
-        current_path = self.model.filePath(current_index)
+        current_path = self.model_list.filePath(current_index)
 
         current_file_info = QFileInfo(current_path)
         # 親ディレクトリのパス文字列を取得
@@ -130,13 +135,13 @@ class FileBrowserWindow(QMainWindow):
 
         # 親パスが現在のパスと異なる場合 (通常のディレクトリ移動)
         if parent_path != current_path:
-            parent_index = self.model.index(parent_path)
+            parent_index = self.model_list.index(parent_path)
             if parent_index.isValid():
                 # tree_view と list_view の両方を更新
                 self.tree_view.setCurrentIndex(parent_index)
                 self.list_view.setRootIndex(parent_index)
                 # パス表示も更新
-                self.path_edit.setText(self.model.filePath(parent_index))
+                self.path_edit.setText(self.model_list.filePath(parent_index))
             else:
                 print(f"警告: 親パス '{parent_path}' の有効なインデックスを取得できませんでした。")
         else:
@@ -144,10 +149,10 @@ class FileBrowserWindow(QMainWindow):
             if current_file_info.isRoot(): # 現在のパスが実際にルートディレクトリであるかを確認
                 # Windowsの場合、QFileSystemModel のルートを空文字列に設定すると、
                 # 自動的にすべての論理ドライブが列挙されます。
-                self.model.setRootPath("") # ⭐ ここでドライブ列挙をトリガー ⭐
+                self.model_list.setRootPath("") # ⭐ ここでドライブ列挙をトリガー ⭐
                 
                 # UIの表示を「コンピューター」などのドライブ一覧モードに切り替える
-                root_index_for_drives = self.model.index("") # 空のパスはモデルのルート (ドライブ一覧) を指す
+                root_index_for_drives = self.model_list.index("") # 空のパスはモデルのルート (ドライブ一覧) を指す
                 self.tree_view.setCurrentIndex(root_index_for_drives)
                 self.list_view.setRootIndex(root_index_for_drives)
                 
