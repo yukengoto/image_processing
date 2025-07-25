@@ -46,7 +46,15 @@ class ThumbnailGenerator(QRunnable):
                 pixmap = QPixmap(self.cache_path)
                 if not pixmap.isNull():
                     self.signal_emitter.thumbnail_ready.emit(self.index, pixmap)
+                    # print(f"DEBUG: サムネイルをキャッシュからロードしました: {self.image_path}") # デバッグ用
                     return
+
+            # 画像ファイルが存在するか最終確認
+            if not os.path.exists(self.image_path):
+                error_msg = f"ERROR: サムネイル生成を試みましたが、ファイルが見つかりません: {self.image_path}"
+                print(error_msg, file=sys.stderr)
+                self.signal_emitter.error.emit(f"ファイルが見つかりません: {os.path.basename(self.image_path)}")
+                return
 
             # 画像が破損している可能性があるのでtry-exceptで囲む
             img = Image.open(self.image_path).convert("RGB")
@@ -59,10 +67,13 @@ class ThumbnailGenerator(QRunnable):
 
             # キャッシュに保存
             pixmap.save(self.cache_path)
+            # print(f"DEBUG: サムネイルを生成しキャッシュに保存しました: {self.image_path}") # デバッグ用
 
             self.signal_emitter.thumbnail_ready.emit(self.index, pixmap)
         except Exception as e:
-            # print(f"サムネイル生成エラー ({self.image_path}): {e}") # デバッグ用
+            # エラーメッセージをコンソールに詳細に出力
+            error_msg = f"ERROR: サムネイル生成中に予期せぬエラーが発生しました ({self.image_path}): {e}"
+            print(error_msg, file=sys.stderr)
             self.signal_emitter.error.emit(f"サムネイル生成エラー ({os.path.basename(self.image_path)}): {e}")
 
 # --- 2. データベースのデータと連携するカスタムテーブルモデル ---
@@ -123,6 +134,7 @@ class ImageTableModel(QAbstractTableModel):
                 return self.thumbnail_cache[file_path]
             else:
                 # サムネイルがない場合、バックグラウンドで生成をリクエスト
+                # print(f"DEBUG: サムネイル生成をリクエスト中: {file_path}") # デバッグ用
                 if file_path and os.path.exists(file_path):
                     generator = ThumbnailGenerator(
                         image_path=file_path,
@@ -132,6 +144,8 @@ class ImageTableModel(QAbstractTableModel):
                         signal_emitter=self.thumbnail_signal_emitter
                     )
                     self.thread_pool.start(generator)
+                # else:
+                #     print(f"DEBUG: ファイルパスが無効または存在しません: {file_path}") # デバッグ用
                 return QPixmap() # ロード中は空のPixmapを返す
 
         return None
@@ -212,9 +226,7 @@ class ImageFeatureViewerApp(QMainWindow):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch) # ファイル名は伸縮
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # パスは内容に合わせる
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # 類似度
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # サイズ
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents) # K-Means
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch) # タグも伸縮
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch) # タグは伸縮
         self.table_view.setColumnWidth(0, 100) # サムネイル列の幅を調整
 
         main_layout.addWidget(self.table_view)
@@ -236,7 +248,7 @@ class ImageFeatureViewerApp(QMainWindow):
         open_action.triggered.connect(self._open_db_file_dialog)
 
         # Recent Files メニュー (まだ機能なし)
-        self.recent_files_menu = file_menu.addMenu("最近開いたファイル")
+        self.recent_files_menu = menubar.addMenu("最近開いたファイル") # ここを修正
         self.recent_files_menu.aboutToShow.connect(self._populate_recent_files_menu) # メニュー表示時に更新
 
         file_menu.addSeparator()
@@ -403,8 +415,14 @@ class ImageFeatureViewerApp(QMainWindow):
                 QMessageBox.critical(self, "エラー", "CLIPモデルが初期化されていません。アプリケーションを再起動してください。")
                 return
 
-            # テキスト特徴量も遅延ロードされたCLIPモデルを使って取得
+            # テキスト特徴量をCLIPモデルから取得し、L2正規化を適用
             search_feature = self.clip_feature_extractor.extract_features_from_text(query_text)
+            if np.linalg.norm(search_feature) > 0: # ゼロ除算を避ける
+                search_feature = search_feature / np.linalg.norm(search_feature)
+            else:
+                self.status_bar.showMessage("検索キーワードの特徴量が無効です。")
+                return
+
 
             results = []
             all_db_data = self.db_manager.get_all_file_metadata() # 全てのメタデータを取得（改善の余地あり）
@@ -418,12 +436,16 @@ class ImageFeatureViewerApp(QMainWindow):
                     # BLOBからNumPy配列に変換
                     image_feature = blob_to_numpy(clip_feature_blob)
                     if image_feature is not None:
-                        # コサイン類似度の計算
-                        # numpy.dot は正規化されたベクトルに対してコサイン類似度を直接計算
-                        similarity = np.dot(search_feature, image_feature.T)
-                        
-                        item['score'] = float(similarity) # スコアを辞書に追加
-                        results.append(item)
+                        # 画像特徴量もL2正規化を適用
+                        if np.linalg.norm(image_feature) > 0: # ゼロ除算を避ける
+                            image_feature = image_feature / np.linalg.norm(image_feature)
+                            # コサイン類似度の計算
+                            similarity = np.dot(search_feature, image_feature.T)
+                            
+                            item['score'] = float(similarity) # スコアを辞書に追加
+                            results.append(item)
+                        # else:
+                        #     print(f"警告: {file_path} の画像特徴量がゼロベクトルです。") # デバッグ用
                 # else:
                 #     print(f"警告: {file_path} にCLIP特徴量が見つかりません。") # デバッグ用
 
