@@ -14,6 +14,9 @@ from PySide6.QtCore import (
     QThreadPool, QRunnable, Signal, QObject, QUrl
 )
 from PySide6.QtGui import QPixmap, QImage, QDesktopServices # QDesktopServices for opening files
+from db_classifier import blob_to_numpy  # 画像特徴量の変換関数をインポート
+import torch
+from classify_image import ImageSorter # 画像分類用のモジュールをインポート
 
 
 # --- 1. サムネイル生成をバックグラウンドで行うためのQRunnableとシグナルエミッター ---
@@ -177,6 +180,8 @@ class ImageManagerApp(QMainWindow):
         self.setWindowTitle("画像マネージャー (PySide6)")
         self.setGeometry(100, 100, 1200, 800)
 
+        self.conn = None # データベース接続
+        self.sorter = None # CLIPモデルをロードするImageSorterオブジェクト
         self.db_path = None
         self.thumbnail_cache_dir = "thumbnail_cache"
         # デフォルトのトップN表示数
@@ -184,6 +189,23 @@ class ImageManagerApp(QMainWindow):
 
         self._create_ui()
         self._connect_signals()
+
+        # CLIPモデルのロード（アプリケーション起動時に一度だけ実行）
+        #self.status_bar = QStatusBar()
+        #self.setStatusBar(self.status_bar) # ステータスバーをセットアップ
+        self.status_bar.showMessage("CLIPモデルをロード中...", 0) # ロード開始メッセージ
+
+        try:
+            # feature_mode='full' で初期化するとCLIPモデルがロードされます
+            self.sorter = ImageSorter(feature_mode='full') 
+            self.status_bar.showMessage("CLIPモデルロード済み。", 5000) # 成功メッセージ
+            # print("CLIPモデルが正常にロードされました。") # コンソール出力も追加可能
+        except Exception as e:
+            self.sorter = None # ロード失敗時はsorterをNoneに設定
+            self.status_bar.showMessage(f"CLIPモデルのロードに失敗しました: {e}", 5000) # 失敗メッセージ
+            # QMessageBox.warning(self, "エラー", f"CLIPモデルのロードに失敗しました。\n検索機能が利用できません。\n詳細: {e}")
+            print(f"CLIPモデルのロードに失敗しました: {e}") # コンソール出力も追加可能
+
 
 
     def _create_ui(self):
@@ -228,7 +250,11 @@ class ImageManagerApp(QMainWindow):
         self.table_view.setModel(self.model)
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectRows) # 行全体を選択
         self.table_view.setSelectionMode(QAbstractItemView.ExtendedSelection) # 複数行選択可能に
-        
+
+        # サムネイルの高さに合わせて行の高さを設定
+        self.table_view.verticalHeader().setDefaultSectionSize(self.model.thumbnail_size.height())
+        #self.table_view.verticalHeader().hide() # 必要であれば行番号を非表示にする
+
         # ヘッダー設定
         self.table_view.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed) # サムネイル列は固定幅
         self.table_view.setColumnWidth(0, self.model.thumbnail_size.width() + 10) # サムネイル列の幅
@@ -379,18 +405,27 @@ class ImageManagerApp(QMainWindow):
             # 実際には、ここにCLIPモデルを使ったキーワード埋め込みとコサイン類似度計算が入る
             # from your_clip_module import get_clip_embedding, calculate_similarity
             # keyword_embedding = get_clip_embedding(keyword)
-            
+            # キーワードのCLIP埋め込みを取得
+            keyword_token = self.sorter.clip_tokenizer([keyword]).to(self.sorter.device)
+            with torch.no_grad():
+                keyword_embedding = self.sorter.model.encode_text(keyword_token).cpu().numpy()[0]
+            keyword_embedding_norm = keyword_embedding / np.linalg.norm(keyword_embedding)
+            # ... (この後に `keyword_embedding_norm` を使用した計算が続きます)            
+
+
             results = []
             for path, feature_vector_blob, tags_str in all_image_data:
                 score = 0.0
                 if feature_vector_blob:
                     # feature_vector_blob を numpy array に変換
-                    feature_vector = np.frombuffer(feature_vector_blob, dtype=np.float32)
+                    #feature_vector = np.frombuffer(feature_vector_blob, dtype=np.float32)
                     
-                    # ⭐ 実際にはここでキーワード特徴量と画像特徴量で類似度を計算 ⭐
-                    # 例: score = calculate_similarity(keyword_embedding, feature_vector)
-                    # 現時点ではランダムなスコアを生成 (デモ用)
-                    score = np.random.rand() # 0.0-1.0のランダムスコア
+                    image_feature = blob_to_numpy(feature_vector_blob)
+                    if image_feature is not None and image_feature.size > 0:
+                        image_feature_norm = image_feature / np.linalg.norm(image_feature)
+                        # ⭐ ここでキーワード特徴量と画像特徴量で類似度を計算しています ⭐
+                        score = np.dot(keyword_embedding_norm, image_feature_norm)
+
                 
                 tags = tags_str.split(',') if tags_str else []
                 results.append({
