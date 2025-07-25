@@ -146,9 +146,9 @@ def main():
 
     # DB Managerの初期化
     db_manager = DBManager(args.db_file)
-    if not db_manager.connect():
-        print("データベース接続に失敗しました。終了します。")
-        return
+    #if not db_manager.connect():
+    #    print("データベース接続に失敗しました。終了します。")
+    #    return
 
     try:
         # --- テストオプション: パスをリスト表示するだけ ---

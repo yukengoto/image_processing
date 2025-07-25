@@ -7,8 +7,8 @@ import hashlib
 from PIL import Image # サムネイル生成用 (pip install Pillow)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QFileDialog, QTableView, QLineEdit, QHeaderView, QLabel,
-    QStatusBar, QAbstractItemView, QMenu, QMenuBar, QMessageBox
+    QPushButton, QFileDialog, QTableView, QLineEdit, QHeaderView,
+    QStatusBar, QAbstractItemView, QMessageBox, QInputDialog
 )
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, Qt, QSize,
@@ -71,7 +71,7 @@ class ImageTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._data = []
         self._total_image_count = 0 # フィルタリング前の全画像数
-        self._headers = ["", "ファイル名", "パス", "類似度", "サイズ", "K-Means", "タグ"] # ヘッダーに「タグ」を追加
+        self._headers = ["", "ファイル名", "パス", "類似度", "タグ"] # ヘッダーに「タグ」を追加
         self.thumbnail_cache = {}
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(os.cpu_count() or 1) # スレッドプール数をCPUコア数に設定
@@ -113,11 +113,7 @@ class ImageTableModel(QAbstractTableModel):
             elif col == 3: # 類似度
                 score = item_data.get('score')
                 return f"{score:.4f}" if score is not None else ""
-            elif col == 4: # サイズ分類
-                return item_data.get('size_category', '')
-            elif col == 5: # K-Means分類
-                return item_data.get('kmeans_category', '')
-            elif col == 6: # タグ列
+            elif col == 4: # タグ列
                 tags = item_data.get('tags', '') # タグデータを取得
                 return tags if tags else "" # タグがあれば表示、なければ空文字列
 
