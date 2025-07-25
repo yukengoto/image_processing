@@ -3,6 +3,8 @@ import os
 import json
 import sqlite3
 import numpy as np
+import time # ファイルのタイムスタンプ取得用
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QTableView, QLineEdit, QHeaderView,
@@ -12,11 +14,11 @@ from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, Qt, QSize,
     QThreadPool, QRunnable, Signal, QObject, QUrl
 )
-from PySide6.QtGui import QPixmap, QImage, QDesktopServices # QDesktopServices for opening files
+from PySide6.QtGui import QPixmap, QImage, QDesktopServices
 
 # --- 新しいモジュールのインポート ---
-from db_manager import DBManager, blob_to_numpy, numpy_to_blob # db_managerから必要な関数とクラスをインポート
-from clip_feature_extractor import CLIPFeatureExtractor # CLIP特徴量抽出器をインポート
+from db_manager import DBManager, blob_to_numpy, numpy_to_blob
+from clip_feature_extractor import CLIPFeatureExtractor
 
 # --- 1. サムネイル生成をバックグラウンドで行うためのQRunnableとシグナルエミッター ---
 class ThumbnailSignalEmitter(QObject):
@@ -153,10 +155,64 @@ class ImageTableModel(QAbstractTableModel):
     def get_total_image_count(self):
         return self._total_image_count
 
-# --- 3. メインアプリケーションウィンドウ ---
+
+# --- 3. データベースへの画像追加をバックグラウンドで行うためのQRunnableとシグナルエミッター ---
+class ImageAddSignalEmitter(QObject):
+    """QRunnableからメインスレッドにシグナルを送るためのヘルパークラス"""
+    progress_update = Signal(str)
+    finished = Signal(int) # 追加されたファイルの数を返す
+    error = Signal(str)
+
+class ImageAdder(QRunnable):
+    """画像ファイルをデータベースに追加するタスク"""
+    def __init__(self, db_manager: DBManager, image_paths: list, signal_emitter: ImageAddSignalEmitter):
+        super().__init__()
+        self.db_manager = db_manager
+        self.image_paths = image_paths
+        self.signal_emitter = signal_emitter
+
+    def run(self):
+        added_count = 0
+        total_files = len(self.image_paths)
+        self.signal_emitter.progress_update.emit(f"データベースに {total_files} 個の画像を追加中...")
+
+        for i, file_path in enumerate(self.image_paths):
+            if not os.path.exists(file_path):
+                self.signal_emitter.progress_update.emit(f"警告: ファイルが見つかりません。スキップします: {file_path}")
+                continue
+            
+            try:
+                # ファイルのメタデータを取得
+                stat_info = os.stat(file_path)
+                file_size = stat_info.st_size
+                creation_time = stat_info.st_ctime
+                last_modified_time = stat_info.st_mtime
+
+                # データベースに挿入または更新 (CLIP特徴量はここではNone)
+                self.db_manager.insert_or_update_file_metadata(
+                    file_path=file_path,
+                    last_modified=last_modified_time,
+                    size=file_size,
+                    creation_time=creation_time,
+                    clip_feature_blob=None, # ここでは特徴量を追加しない
+                    tags="", # 新規追加時はタグは空
+                    size_category="",
+                    kmeans_category=""
+                )
+                added_count += 1
+                self.signal_emitter.progress_update.emit(f"追加中: {added_count}/{total_files} ({os.path.basename(file_path)})")
+            except Exception as e:
+                error_msg = f"ERROR: ファイル '{file_path}' の追加中にエラーが発生しました: {e}"
+                print(error_msg, file=sys.stderr)
+                self.signal_emitter.error.emit(f"ファイル追加エラー ({os.path.basename(file_path)}): {e}")
+        
+        self.signal_emitter.finished.emit(added_count)
+
+
+# --- 4. メインアプリケーションウィンドウ ---
 class ImageFeatureViewerApp(QMainWindow):
     SETTINGS_FILE = "image_feature_manager.config.json"
-    SUPPORTED_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp') # サポートする画像拡張子
+    SUPPORTED_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp')
 
     def __init__(self):
         super().__init__()
@@ -180,8 +236,9 @@ class ImageFeatureViewerApp(QMainWindow):
         self._init_ui()
         self._init_menu()
         
-        # ★修正点: アプリケーションウィンドウでD&Dを受け入れる
         self.setAcceptDrops(True)
+        self.thread_pool = QThreadPool() # アプリケーション全体でスレッドプールを使用
+        self.thread_pool.setMaxThreadCount(os.cpu_count() * 2 or 2) # スレッド数を調整
 
     def _init_ui(self):
         central_widget = QWidget()
@@ -487,6 +544,9 @@ class ImageFeatureViewerApp(QMainWindow):
             
             self.status_bar.showMessage(f"{updated_count} 個のファイルにCLIP特徴量を追加しました。")
             QMessageBox.information(self, "完了", f"{updated_count} 個のファイルにCLIP特徴量を追加しました。")
+            
+            # DBに画像が追加され、特徴量も追加された可能性があるため、テーブルを再表示
+            self._display_all_images_from_db()
 
         except Exception as e:
             self.status_bar.showMessage(f"特徴量取得中にエラーが発生しました: {e}")
@@ -547,23 +607,19 @@ class ImageFeatureViewerApp(QMainWindow):
                 else:
                     QMessageBox.warning(self, "ファイルが見つかりません", f"ファイルが見つかりません:\n{file_path}")
 
-    # ★D&Dイベントハンドラ
     def dragEnterEvent(self, event):
-        """ドラッグされたデータがURLリスト（ファイルパス）を含む場合にドロップを受け入れる"""
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event):
-        """ドラッグ中のイベントを処理（ドラッグが有効な場合にアイコンを変更）"""
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event):
-        """ドロップされたデータを処理する"""
         if not self.db_manager:
             QMessageBox.warning(self, "エラー", "DBが開かれていません。先にDBを開くか作成してください。")
             event.ignore()
@@ -589,7 +645,6 @@ class ImageFeatureViewerApp(QMainWindow):
                 elif os.path.isdir(path):
                     folders_to_process.append(path)
             
-            # フォルダがドロップされた場合、再帰処理を確認
             if folders_to_process:
                 reply = QMessageBox.question(
                     self,
@@ -605,30 +660,75 @@ class ImageFeatureViewerApp(QMainWindow):
                 recursive = (reply == QMessageBox.StandardButton.Yes)
                 
                 self.status_bar.showMessage("フォルダ内の画像ファイルをスキャン中...")
-                QApplication.processEvents() # UIを更新
+                QApplication.processEvents()
 
                 for folder_path in folders_to_process:
                     for root, _, files in os.walk(folder_path):
                         for file_name in files:
                             if file_name.lower().endswith(self.SUPPORTED_IMAGE_EXTENSIONS):
-                                image_paths_to_add.append(os.path.join(root, file_name))
-                        if not recursive: # 再帰的でない場合は、トップレベルのみ処理
+                                full_path = os.path.join(root, file_name)
+                                # 既にDBにあるファイルはスキップ
+                                if not self.db_manager.get_file_metadata(full_path):
+                                    image_paths_to_add.append(full_path)
+                        if not recursive:
                             break
 
             if image_paths_to_add:
-                # ここで画像をDBに追加し、特徴量を抽出する処理を呼び出す
-                # 現時点ではステータスバーにメッセージを表示するのみ
-                QMessageBox.information(self, "画像追加準備", 
-                                        f"合計 {len(image_paths_to_add)} 個の画像が追加対象です。\n"
-                                        "次のステップでデータベースへの追加と特徴量抽出を実装します。")
-                self.status_bar.showMessage(f"ドロップされた {len(image_paths_to_add)} 個の画像を処理対象として識別しました。")
-                # print(f"処理対象の画像パス: {image_paths_to_add}") # デバッグ用
+                # 重複を排除し、ユニークなパスのみにする
+                image_paths_to_add = list(set(image_paths_to_add))
+                if not image_paths_to_add:
+                    self.status_bar.showMessage("追加する新しい画像ファイルは見つかりませんでした。")
+                    event.acceptProposedAction()
+                    return
+
+                # ImageAdderを起動
+                adder_emitter = ImageAddSignalEmitter()
+                adder_emitter.progress_update.connect(self.status_bar.showMessage)
+                adder_emitter.finished.connect(self._on_image_add_finished)
+                adder_emitter.error.connect(lambda msg: QMessageBox.warning(self, "ファイル追加エラー", msg))
+
+                adder = ImageAdder(self.db_manager, image_paths_to_add, adder_emitter)
+                self.thread_pool.start(adder)
+                self.status_bar.showMessage(f"{len(image_paths_to_add)} 個の画像のデータベースへの追加を開始しました...")
+
             else:
                 self.status_bar.showMessage("ドロップされたファイルの中にサポートされている画像ファイルは見つかりませんでした。")
             
             event.acceptProposedAction()
         else:
             event.ignore()
+
+    def _on_image_add_finished(self, added_count: int):
+        """ImageAdderからの完了シグナルを受け取った際の処理"""
+        self.status_bar.showMessage(f"データベースに {added_count} 個の画像を追加しました。")
+        QMessageBox.information(self, "画像追加完了", f"データベースに {added_count} 個の画像を新規追加しました。")
+        # データベースの総画像数を更新して表示
+        total_count = self.db_manager.get_total_image_count()
+        self.status_bar.showMessage(f"データベース更新完了。全画像数: {total_count}")
+        # テーブル表示を更新（必要であれば全件表示をリフレッシュ）
+        self._display_all_images_from_db()
+
+
+    def _display_all_images_from_db(self):
+        """データベース内の全画像をテーブルに表示（類似度順はなし）"""
+        if not self.db_manager:
+            return
+        try:
+            all_db_data = self.db_manager.get_all_file_metadata()
+            total_count = len(all_db_data)
+            # スコアなしで表示する場合（または適当なデフォルトスコア）
+            for item in all_db_data:
+                item['score'] = None # スコアは検索時のみ設定される
+            
+            # ファイルパスでソートして表示
+            display_data = sorted(all_db_data, key=lambda x: x.get('file_path', ''))
+            
+            self.model.set_data(display_data[:self.top_n_display_count], total_count)
+            self.status_bar.showMessage(f"全画像を再表示しました。合計 {total_count} 件中、上位 {len(display_data[:self.top_n_display_count])} 件を表示中。")
+        except Exception as e:
+            self.status_bar.showMessage(f"全画像表示中にエラーが発生しました: {e}")
+            print(f"全画像表示エラー: {e}", file=sys.stderr)
+
 
     def closeEvent(self, event):
         self._save_settings()

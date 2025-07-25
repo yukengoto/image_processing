@@ -93,46 +93,48 @@ class DBManager:
             print(f"データベースの初期化エラー: {e}", file=sys.stderr)
             raise # エラーを上位に伝える
 
-    # insert_or_update_file_metadata から size_category, kmeans_category を削除
-    def insert_or_update_file_metadata(self, file_path, last_modified, size, creation_time, clip_feature=None, user_sort_order=0):
+    def insert_or_update_file_metadata(self, file_path, last_modified, size, creation_time, 
+                                       clip_feature_blob=None, tags="", size_category="", kmeans_category=""):
         """
-        ファイルメタデータを挿入または更新します。
-        既存のファイルパスがあれば更新、なければ新規挿入。
+        ファイルメタデータ（とオプションでCLIP特徴量）をデータベースに挿入または更新します。
+        file_pathが既に存在する場合は更新、存在しない場合は新規挿入します。
         """
-        cursor = self.conn.cursor()
-        clip_feature_blob = numpy_to_blob(clip_feature) if clip_feature is not None else None
+        try:
+            cursor = self.conn.cursor()
+            
+            # 既存のレコードがあるかチェック
+            cursor.execute("SELECT file_path FROM file_metadata WHERE file_path = ?", (file_path,))
+            existing_record = cursor.fetchone()
 
-        # 既存のレコードがあるか確認
-        cursor.execute("SELECT id FROM file_metadata WHERE file_path = ?", (file_path,))
-        existing_id = cursor.fetchone()
-
-        if existing_id:
-            # 更新
-            update_sql = """
-                UPDATE file_metadata SET
-                    last_modified = ?,
-                    size = ?,
-                    creation_time = ?,
-                    clip_feature_blob = COALESCE(?, clip_feature_blob), -- NULLでない場合にのみ更新
-                    user_sort_order = ?
-                WHERE file_path = ?
-            """
-            cursor.execute(update_sql, (
-                last_modified, size, creation_time,
-                clip_feature_blob, user_sort_order,
-                file_path
-            ))
-        else:
-            # 挿入
-            insert_sql = """
-                INSERT INTO file_metadata (file_path, last_modified, size, creation_time, clip_feature_blob, user_sort_order)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """
-            cursor.execute(insert_sql, (
-                file_path, last_modified, size, creation_time, clip_feature_blob, user_sort_order
-            ))
-        self.conn.commit()
-    
+            if existing_record:
+                # レコードが存在する場合、更新
+                update_query = """
+                    UPDATE file_metadata
+                    SET last_modified = ?, size = ?, creation_time = ?,
+                        clip_feature_blob = COALESCE(?, clip_feature_blob), -- ?がNULLでなければ更新、NULLなら既存値を保持
+                        tags = ?, size_category = ?, kmeans_category = ?
+                    WHERE file_path = ?
+                """
+                cursor.execute(update_query, (
+                    last_modified, size, creation_time, clip_feature_blob,
+                    tags, size_category, kmeans_category, file_path
+                ))
+            else:
+                # レコードが存在しない場合、新規挿入
+                insert_query = """
+                    INSERT INTO file_metadata
+                    (file_path, last_modified, size, creation_time, clip_feature_blob, tags, size_category, kmeans_category)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """
+                cursor.execute(insert_query, (
+                    file_path, last_modified, size, creation_time, clip_feature_blob,
+                    tags, size_category, kmeans_category
+                ))
+            self.conn.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"データベース操作エラー: {e}", file=sys.stderr)
+            return False
     # get_all_file_metadata から size_category, kmeans_category を削除
     def get_all_file_metadata(self):
         """file_metadataテーブルから全てのファイルパスと関連情報を取得します。
