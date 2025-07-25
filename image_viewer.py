@@ -228,13 +228,13 @@ class ImageManagerApp(QMainWindow):
         self.keyword_input.setPlaceholderText("キーワードを入力...")
         self.search_button = QPushButton("検索")
         
-        self.threshold_input = QLineEdit("0.5") # デフォルト閾値
+        self.threshold_input = QLineEdit("0.2") # デフォルト閾値
         self.threshold_input.setPlaceholderText("閾値 (0.0-1.0)")
-        self.threshold_input.setFixedWidth(100) # 幅を固定
+        self.threshold_input.setFixedWidth(50) # 幅を固定
 
         self.top_n_input = QLineEdit(str(self.top_n_display_count)) # デフォルト表示件数
         self.top_n_input.setPlaceholderText("上位N件")
-        self.top_n_input.setFixedWidth(100)
+        self.top_n_input.setFixedWidth(70)
 
         search_layout.addWidget(self.keyword_input)
         search_layout.addWidget(self.search_button)
@@ -296,10 +296,10 @@ class ImageManagerApp(QMainWindow):
         try:
             self.current_threshold = float(text)
             if not (0.0 <= self.current_threshold <= 1.0):
-                self.current_threshold = 0.5 # 無効な場合はデフォルト
+                self.current_threshold = 0.2 # 無効な場合はデフォルト
             # ここで自動的に検索を再実行することも可能
         except ValueError:
-            self.current_threshold = 0.5 # 無効な入力の場合はデフォルトに戻す
+            self.current_threshold = 0.2 # 無効な入力の場合はデフォルトに戻す
 
 
     def open_sqlite_file(self):
