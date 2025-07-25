@@ -1,0 +1,10 @@
+{
+    "top_n_display_count": 1000,
+    "similarity_threshold": 0.25,
+    "recent_db_paths": [
+        "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/37pixiv.txt.db"
+    ],
+    "last_opened_db_path": "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/37pixiv.txt.db",
+    "window_x": 132,
+    "window_y": 1177
+}

@@ -19,8 +19,6 @@ from PySide6.QtGui import QPixmap, QImage, QDesktopServices # QDesktopServices f
 # --- 新しいモジュールのインポート ---
 from db_manager import DBManager, blob_to_numpy, numpy_to_blob # db_managerから必要な関数とクラスをインポート
 from clip_feature_extractor import CLIPFeatureExtractor # CLIP特徴量抽出器をインポート
-# from classify_image import ImageSorter # <-- 削除！
-# import torch # <-- 削除！
 
 # --- 1. サムネイル生成をバックグラウンドで行うためのQRunnableとシグナルエミッター ---
 class ThumbnailSignalEmitter(QObject):
@@ -46,7 +44,6 @@ class ThumbnailGenerator(QRunnable):
                 pixmap = QPixmap(self.cache_path)
                 if not pixmap.isNull():
                     self.signal_emitter.thumbnail_ready.emit(self.index, pixmap)
-                    # print(f"DEBUG: サムネイルをキャッシュからロードしました: {self.image_path}") # デバッグ用
                     return
 
             # 画像ファイルが存在するか最終確認
@@ -68,7 +65,6 @@ class ThumbnailGenerator(QRunnable):
 
             # キャッシュに保存
             pixmap.save(self.cache_path)
-            # print(f"DEBUG: サムネイルを生成しキャッシュに保存しました: {self.image_path}") # デバッグ用
 
             self.signal_emitter.thumbnail_ready.emit(self.index, pixmap)
         except Exception as e:
@@ -135,18 +131,15 @@ class ImageTableModel(QAbstractTableModel):
                 return self.thumbnail_cache[file_path]
             else:
                 # サムネイルがない場合、バックグラウンドで生成をリクエスト
-                # print(f"DEBUG: サムネイル生成をリクエスト中: {file_path}") # デバッグ用
                 if file_path and os.path.exists(file_path):
                     generator = ThumbnailGenerator(
                         image_path=file_path,
-                        size=QSize(100, 100),
+                        size=QSize(100, 100), # ★ここはこのままで、行の高さで調整
                         cache_dir=self.thumbnail_cache_dir,
                         index=index,
                         signal_emitter=self.thumbnail_signal_emitter
                     )
                     self.thread_pool.start(generator)
-                # else:
-                #     print(f"DEBUG: ファイルパスが無効または存在しません: {file_path}") # デバッグ用
                 return QPixmap() # ロード中は空のPixmapを返す
 
         return None
@@ -171,21 +164,33 @@ class ImageTableModel(QAbstractTableModel):
 
 # --- 3. メインアプリケーションウィンドウ ---
 class ImageFeatureViewerApp(QMainWindow):
+    # 設定ファイル名
+    SETTINGS_FILE = "image_feature_manager.config.json"
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("画像特徴量検索＆管理")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setGeometry(100, 100, 1200, 800) # デフォルトの位置とサイズ
 
         self.db_path = None
         self.db_manager = None # DBManagerのインスタンス
         self.clip_feature_extractor = None # CLIPFeatureExtractorのインスタンス
 
+        # デフォルトの設定値
+        self.top_n_display_count = 1000 
+        self.similarity_threshold = 0.25 # ★デフォルト閾値を0.25に変更
+        self.recent_db_paths = [] # 最近開いたDBファイルのリスト
+        self.window_x = 100 # デフォルトのウィンドウ位置
+        self.window_y = 100 # デフォルトのウィンドウ位置
+
+        self._load_settings() # ★設定を最初にロード
+
+        self.move(self.window_x, self.window_y) # ★保存された位置に移動
+
         self._init_ui()
         self._init_menu() # メニューバーの初期化
 
-        # 最後に開いたDBファイルのパスを読み込む
-        self.last_opened_db_path_file = "last_opened_db_path.txt"
-        self._load_last_opened_db_path()
+        # DBパスの読み込みロジックは_load_settingsに統合されたため不要
 
     def _init_ui(self):
         central_widget = QWidget()
@@ -230,16 +235,15 @@ class ImageFeatureViewerApp(QMainWindow):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch) # タグは伸縮
         self.table_view.setColumnWidth(0, 100) # サムネイル列の幅を調整
 
+        # ★行の高さをサムネイルサイズに合わせて調整
+        self.table_view.verticalHeader().setDefaultSectionSize(105) # 100x100サムネイル + 5pxパディング
+
         main_layout.addWidget(self.table_view)
 
         # ステータスバー
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("準備完了。DBファイルを開いてください。")
-
-        # 表示件数設定
-        self.top_n_display_count = 1000 # デフォルト
-        self.similarity_threshold = 0.5 # デフォルトの類似度閾値
 
     def _init_menu(self):
         menubar = self.menuBar()
@@ -248,8 +252,8 @@ class ImageFeatureViewerApp(QMainWindow):
         open_action = file_menu.addAction("DBを開く...")
         open_action.triggered.connect(self._open_db_file_dialog)
 
-        # Recent Files メニュー (まだ機能なし)
-        self.recent_files_menu = menubar.addMenu("最近開いたファイル") # ここを修正
+        # Recent Files メニュー
+        self.recent_files_menu = menubar.addMenu("最近開いたファイル")
         self.recent_files_menu.aboutToShow.connect(self._populate_recent_files_menu) # メニュー表示時に更新
 
         file_menu.addSeparator()
@@ -257,13 +261,11 @@ class ImageFeatureViewerApp(QMainWindow):
         exit_action.triggered.connect(self.close)
 
         settings_menu = menubar.addMenu("設定")
-        # ここに表示件数や閾値の設定アクションを追加する予定
         set_display_count_action = settings_menu.addAction("表示件数を設定...")
         set_display_count_action.triggered.connect(self._set_display_count)
         set_threshold_action = settings_menu.addAction("類似度閾値を設定...")
         set_threshold_action.triggered.connect(self._set_similarity_threshold)
 
-        # ここにタグ関連の機能を追加する予定
         tag_menu = menubar.addMenu("タグ")
         self.add_tag_action = tag_menu.addAction("選択したファイルにタグを追加...")
         self.add_tag_action.triggered.connect(self._add_tags_to_selected_files)
@@ -275,61 +277,68 @@ class ImageFeatureViewerApp(QMainWindow):
 
     def _populate_recent_files_menu(self):
         self.recent_files_menu.clear()
-        recent_paths = self._load_recent_db_paths()
-        if not recent_paths:
+        if not self.recent_db_paths:
             self.recent_files_menu.addAction("最近開いたファイルはありません").setEnabled(False)
             return
 
-        for path in recent_paths:
+        for path in self.recent_db_paths:
             action = self.recent_files_menu.addAction(os.path.basename(path))
             action.setData(path) # パスをアクションに関連付ける
             action.triggered.connect(lambda checked, p=path: self._open_db(p))
 
-    def _load_last_opened_db_path(self):
-        """最後に開いたDBファイルのパスを読み込み、存在すれば開く"""
-        if os.path.exists(self.last_opened_db_path_file):
-            with open(self.last_opened_db_path_file, 'r', encoding='utf-8') as f:
-                last_path = f.readline().strip()
-            if last_path and os.path.exists(last_path):
-                self._open_db(last_path)
-        
-    def _save_last_opened_db_path(self, path):
-        """最後に開いたDBファイルのパスを保存する"""
-        try:
-            with open(self.last_opened_db_path_file, 'w', encoding='utf-8') as f:
-                f.write(path)
-        except Exception as e:
-            print(f"最後に開いたDBパスの保存中にエラーが発生しました: {e}")
-
-    def _load_recent_db_paths(self):
-        """最近開いたDBファイルのリストを読み込む（ダミー実装、後で永続化する）"""
-        # ここは永続化されるべきリストになります。今は一時的なダミー
-        recent_paths_file = "recent_db_paths.json"
-        if os.path.exists(recent_paths_file):
+    def _load_settings(self):
+        """アプリケーション設定をファイルから読み込む"""
+        if os.path.exists(self.SETTINGS_FILE):
             try:
-                with open(recent_paths_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except json.JSONDecodeError:
-                return []
-        return []
+                with open(self.SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+                    self.top_n_display_count = settings.get('top_n_display_count', self.top_n_display_count)
+                    self.similarity_threshold = settings.get('similarity_threshold', self.similarity_threshold)
+                    self.recent_db_paths = settings.get('recent_db_paths', [])
+                    # ウィンドウ位置をロード
+                    self.window_x = settings.get('window_x', self.window_x)
+                    self.window_y = settings.get('window_y', self.window_y)
+
+                    # 最後に開いたDBパスを直接開く試み
+                    last_path = settings.get('last_opened_db_path')
+                    if last_path and os.path.exists(last_path):
+                        # DBは後で_open_dbが呼ばれる際に開かれるので、ここではパスだけ設定
+                        self.db_path = last_path 
+
+            except (IOError, json.JSONDecodeError) as e:
+                print(f"設定ファイルの読み込み中にエラーが発生しました: {e}", file=sys.stderr)
+                # エラー時はデフォルト値を使用
+
+    def _save_settings(self):
+        """アプリケーション設定をファイルに保存する"""
+        # 現在のウィンドウ位置を取得
+        current_pos = self.pos()
+        self.window_x = current_pos.x()
+        self.window_y = current_pos.y()
+
+        settings = {
+            'top_n_display_count': self.top_n_display_count,
+            'similarity_threshold': self.similarity_threshold,
+            'recent_db_paths': self.recent_db_paths,
+            'last_opened_db_path': self.db_path, # 現在開いているDBを最後に開いたDBとして保存
+            'window_x': self.window_x,
+            'window_y': self.window_y,
+        }
+        try:
+            with open(self.SETTINGS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, ensure_ascii=False, indent=4)
+        except IOError as e:
+            print(f"設定ファイルの保存中にエラーが発生しました: {e}", file=sys.stderr)
 
     def _add_recent_db_path(self, path):
-        """最近開いたDBファイルのリストにパスを追加する（ダミー実装）"""
-        recent_paths = self._load_recent_db_paths()
-        if path in recent_paths:
-            recent_paths.remove(path) # 既存なら一旦削除して最新にする
-        recent_paths.insert(0, path) # 先頭に追加
+        """最近開いたDBファイルのリストにパスを追加する"""
+        if path in self.recent_db_paths:
+            self.recent_db_paths.remove(path) # 既存なら一旦削除して最新にする
+        self.recent_db_paths.insert(0, path) # 先頭に追加
         # 最大数で制限
         max_recent = 10
-        if len(recent_paths) > max_recent:
-            recent_paths = recent_paths[:max_recent]
-        
-        recent_paths_file = "recent_db_paths.json"
-        try:
-            with open(recent_paths_file, 'w', encoding='utf-8') as f:
-                json.dump(recent_paths, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            print(f"最近開いたDBパスの保存中にエラーが発生しました: {e}")
+        if len(self.recent_db_paths) > max_recent:
+            self.recent_db_paths = self.recent_db_paths[:max_recent]
 
     def _open_db_file_dialog(self):
         options = QFileDialog.Option.DontUseNativeDialog
@@ -351,10 +360,9 @@ class ImageFeatureViewerApp(QMainWindow):
             self.db_manager = DBManager(self.db_path)
             # CLIPFeatureExtractorはDBManagerとは独立してインスタンス化
             if self.clip_feature_extractor is None:
-                self.clip_feature_extractor = CLIPFeatureExtractor() # ここで初めてインスタンス化される
+                self.clip_feature_extractor = CLIPFeatureExtractor()
 
             self.status_bar.showMessage(f"データベース '{os.path.basename(self.db_path)}' を開きました。")
-            self._save_last_opened_db_path(self.db_path) # 最後に開いたDBを保存
             self._add_recent_db_path(self.db_path) # 最近開いたリストに追加
             
             # DBが開かれたら関連機能を有効化
@@ -382,7 +390,6 @@ class ImageFeatureViewerApp(QMainWindow):
             QMessageBox.critical(self, "初期化エラー", f"アプリケーションの初期化中にエラーが発生しました:\n{e}")
 
     def _set_display_count(self):
-        # QInputDialog を使って表示件数を設定するロジックをここに追加
         new_count, ok = QInputDialog.getInt(self, "表示件数を設定", "表示する画像の最大数:",
                                              self.top_n_display_count, 1, 10000)
         if ok:
@@ -390,7 +397,6 @@ class ImageFeatureViewerApp(QMainWindow):
             self.status_bar.showMessage(f"表示件数を {self.top_n_display_count} に設定しました。")
 
     def _set_similarity_threshold(self):
-        # QInputDialog を使って類似度閾値を設定するロジックをここに追加
         new_threshold, ok = QInputDialog.getDouble(self, "類似度閾値を設定", "類似度閾値 (0.0 - 1.0):",
                                                     self.similarity_threshold, 0.0, 1.0, 2)
         if ok:
@@ -410,59 +416,43 @@ class ImageFeatureViewerApp(QMainWindow):
         try:
             self.status_bar.showMessage("検索中...")
             
-            # 検索キーワードの特徴量を抽出
-            # clip_feature_extractorは_open_dbでインスタンス化されているはず
             if self.clip_feature_extractor is None:
                 QMessageBox.critical(self, "エラー", "CLIPモデルが初期化されていません。アプリケーションを再起動してください。")
                 return
 
-            # テキスト特徴量をCLIPモデルから取得し、L2正規化を適用
             search_feature = self.clip_feature_extractor.extract_features_from_text(query_text)
-            if np.linalg.norm(search_feature) > 0: # ゼロ除算を避ける
+            if np.linalg.norm(search_feature) > 0:
                 search_feature = search_feature / np.linalg.norm(search_feature)
             else:
                 self.status_bar.showMessage("検索キーワードの特徴量が無効です。")
                 return
 
-
             results = []
-            all_db_data = self.db_manager.get_all_file_metadata() # 全てのメタデータを取得（改善の余地あり）
+            all_db_data = self.db_manager.get_all_file_metadata()
 
-            # データベースから特徴量を取得し、類似度を計算
             for item in all_db_data:
                 file_path = item.get('file_path')
                 clip_feature_blob = item.get('clip_feature_blob')
 
                 if clip_feature_blob:
-                    # BLOBからNumPy配列に変換
                     image_feature = blob_to_numpy(clip_feature_blob)
                     if image_feature is not None:
-                        # 画像特徴量もL2正規化を適用
-                        if np.linalg.norm(image_feature) > 0: # ゼロ除算を避ける
+                        if np.linalg.norm(image_feature) > 0:
                             image_feature = image_feature / np.linalg.norm(image_feature)
-                            # コサイン類似度の計算
                             similarity = np.dot(search_feature, image_feature.T)
                             
-                            item['score'] = float(similarity) # スコアを辞書に追加
+                            item['score'] = float(similarity)
                             results.append(item)
-                        # else:
-                        #     print(f"警告: {file_path} の画像特徴量がゼロベクトルです。") # デバッグ用
-                # else:
-                #     print(f"警告: {file_path} にCLIP特徴量が見つかりません。") # デバッグ用
 
-            total_image_count = len(all_db_data) # フィルタリング前の全画像数
+            total_image_count = len(all_db_data)
             
-            # 閾値でフィルタリング
             filtered_results = [r for r in results if r['score'] >= self.similarity_threshold]
 
-            # スコアで降順にソート
             sorted_results = sorted(filtered_results, key=lambda x: x['score'], reverse=True)
 
-            # 上位N件に絞り込み
             display_data = sorted_results[:self.top_n_display_count]
             
-            # モデルを更新
-            self.model.set_data(display_data, total_image_count) # 検索結果と全画像数を渡す
+            self.model.set_data(display_data, total_image_count)
             self.status_bar.showMessage(f"検索完了。上位 {len(display_data)} 件を表示中。({total_image_count} 件中)")
 
         except sqlite3.Error as e:
@@ -479,10 +469,9 @@ class ImageFeatureViewerApp(QMainWindow):
             return
         
         self.status_bar.showMessage("特徴量がないファイルを検索し、取得中です...")
-        QApplication.processEvents() # UIを更新
+        QApplication.processEvents()
         
         try:
-            # DBからCLIP特徴量がないファイルパスのリストを取得
             files_without_features = self.db_manager.get_file_paths_without_clip_features()
             
             if not files_without_features:
@@ -492,8 +481,6 @@ class ImageFeatureViewerApp(QMainWindow):
             self.status_bar.showMessage(f"{len(files_without_features)} 個のファイルの特徴量を抽出中...")
             QApplication.processEvents()
 
-            # CLIPFeatureExtractorを使用して特徴量を抽出
-            # extract_features_from_pathsは(features_np, processed_indices)を返す
             extracted_features, processed_indices = self.clip_feature_extractor.extract_features_from_paths(files_without_features)
             
             if len(extracted_features) == 0:
@@ -501,13 +488,10 @@ class ImageFeatureViewerApp(QMainWindow):
                 return
 
             updated_count = 0
-            # 抽出した特徴量をDBに保存
             for i, original_index in enumerate(processed_indices):
                 file_path = files_without_features[original_index]
                 feature_blob = numpy_to_blob(extracted_features[i])
                 
-                # DBManagerを使って特徴量を更新
-                # DBManagerにはupdate_file_metadataメソッドがある想定
                 self.db_manager.update_file_metadata(file_path, {'clip_feature_blob': feature_blob})
                 updated_count += 1
             
@@ -518,9 +502,7 @@ class ImageFeatureViewerApp(QMainWindow):
             self.status_bar.showMessage(f"特徴量取得中にエラーが発生しました: {e}")
             QMessageBox.critical(self, "特徴量取得エラー", f"特徴量取得中に予期せぬエラーが発生しました:\n{e}")
 
-
     def _add_tags_to_selected_files(self):
-        """選択したファイルにタグを追加する（まだ実装していません）"""
         if not self.db_manager:
             QMessageBox.warning(self, "エラー", "DBが開かれていません。")
             return
@@ -530,8 +512,6 @@ class ImageFeatureViewerApp(QMainWindow):
             QMessageBox.information(self, "情報", "タグを追加するファイルを選択してください。")
             return
 
-        # ユーザーにタグを入力させるダイアログを表示
-        from PySide6.QtWidgets import QInputDialog
         tags_text, ok = QInputDialog.getText(self, "タグの追加", "追加するタグをカンマ区切りで入力してください:")
         
         if ok and tags_text:
@@ -548,9 +528,8 @@ class ImageFeatureViewerApp(QMainWindow):
                     current_tags_str = row_data.get('tags', '')
                     current_tags = set([t.strip() for t in current_tags_str.split(',') if t.strip()])
                     
-                    # 新しいタグを追加
                     updated_tags = current_tags.union(set(new_tags))
-                    updated_tags_str = ','.join(sorted(list(updated_tags))) # ソートして結合
+                    updated_tags_str = ','.join(sorted(list(updated_tags)))
                     
                     try:
                         self.db_manager.update_file_metadata(file_path, {'tags': updated_tags_str})
@@ -561,17 +540,12 @@ class ImageFeatureViewerApp(QMainWindow):
 
             if updated_count > 0:
                 QMessageBox.information(self, "完了", f"{updated_count} 個のファイルにタグを追加しました。")
-                # 画面を更新するために検索を再実行するか、モデルデータを更新
                 self._perform_search() # 現在の検索条件で再検索して表示を更新
             else:
                 QMessageBox.warning(self, "警告", "タグの追加に失敗したファイルがあります。")
 
     def _filter_files_by_tags(self):
-        """指定のタグを持つファイルを非表示にする（まだ実装していません）"""
         QMessageBox.information(self, "機能開発中", "この機能はまだ実装されていません。")
-        # TODO: タグ入力ダイアログを表示し、db_managerからフィルタリングされたデータを取得してモデルを更新するロジックを実装
-        # _perform_searchを拡張するか、新しい表示メソッドを作成する必要がある
-        pass
 
     def _open_file_on_double_click(self, index: QModelIndex):
         """テーブルビューの行をダブルクリックしたときにファイルを開く"""
@@ -580,13 +554,13 @@ class ImageFeatureViewerApp(QMainWindow):
             if row_data and 'file_path' in row_data:
                 file_path = row_data['file_path']
                 if os.path.exists(file_path):
-                    # OSのデフォルトビューアでファイルを開く
                     QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
                 else:
                     QMessageBox.warning(self, "ファイルが見つかりません", f"ファイルが見つかりません:\n{file_path}")
 
     def closeEvent(self, event):
-        """アプリケーション終了時にDB接続を閉じる"""
+        """アプリケーション終了時にDB接続を閉じ、設定を保存する"""
+        self._save_settings() # ★設定を保存
         if self.db_manager:
             self.db_manager.close()
         super().closeEvent(event)
