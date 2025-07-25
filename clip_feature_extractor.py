@@ -175,6 +175,21 @@ class CLIPFeatureExtractor:
         features_np = np.array(features)
         return features_np, processed_indices
 
+    def extract_features_from_text(self, text_query: str) -> np.ndarray:
+        """
+        テキストクエリからCLIP特徴量を抽出します。
+        戻り値: 正規化されたNumPy配列の特徴量
+        """
+        self._load_clip_model() # ここで_load_clip_model()を呼び出すことで、必要な場合にモデルがロードされる
+        import torch # メソッド内でインポート
+
+        text = self.clip_tokenizer(text_query).to(self.device)
+        with torch.no_grad():
+            text_features = self.model.encode_text(text)
+        
+        # 特徴量を正規化してNumPy配列として返す
+        return text_features.cpu().numpy()[0] / np.linalg.norm(text_features.cpu().numpy()[0])
+
     def get_keyword_features(self):
         """分類キーワードの特徴量（NumPy配列）を返します。"""
         self._prepare_keyword_features()
