@@ -58,7 +58,8 @@ class ThumbnailGenerator(QRunnable):
 
             # 画像が破損している可能性があるのでtry-exceptで囲む
             img = Image.open(self.image_path).convert("RGB")
-            img.thumbnail(self.size, Image.Resampling.LANCZOS) # より高品質なリサンプリング
+            # 修正: QSizeオブジェクトから幅と高さを抽出し、タプルとして渡す
+            img.thumbnail((self.size.width(), self.size.height()), Image.Resampling.LANCZOS) # より高品質なリサンプリング
 
             # PySide6/Qtで表示するためにQImageに変換
             data = img.tobytes("raw", "RGB")
