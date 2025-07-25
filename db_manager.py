@@ -1,8 +1,8 @@
 import sqlite3
-import os
 import numpy as np
 import io
 import sys
+import os # os.statなど、ファイルシステム操作のために追加
 
 # --- NumPy配列 <-> BLOB変換ヘルパー関数 ---
 def numpy_to_blob(arr):
@@ -37,6 +37,8 @@ class DBManager:
         if self.conn is None:
             self.conn = sqlite3.connect(self.db_path)
             self.conn.row_factory = sqlite3.Row # カラム名をキーとして結果を取得できるようにする
+            self.conn.execute("PRAGMA journal_mode=WAL;") # WALモードは高い並行性を実現
+            self.conn.execute("PRAGMA synchronous=NORMAL;") # パフォーマンス向上
 
     def close(self):
         """データベース接続を閉じます。"""
@@ -50,7 +52,7 @@ class DBManager:
             cursor = self.conn.cursor()
 
             # file_metadata テーブルが存在しない場合は、必要なカラム全てを含むテーブルを作成
-            # size_category, kmeans_category を削除
+            # size_category, kmeans_category は削除した状態
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS file_metadata (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,7 +68,6 @@ class DBManager:
             
             # 既存のテーブルに不足しているカラムを追加するためのALTER TABLE文
             # PRAGMA table_info を使用して、より確実にカラムの存在を確認
-            # size_category, kmeans_category を削除
             column_additions = {
                 'clip_feature_blob': 'BLOB',
                 'user_sort_order': 'INTEGER DEFAULT 0',
@@ -94,7 +95,7 @@ class DBManager:
             raise # エラーを上位に伝える
 
     def insert_or_update_file_metadata(self, file_path, last_modified, size, creation_time, 
-                                       clip_feature_blob=None, tags="", size_category="", kmeans_category=""):
+                                       clip_feature_blob=None, tags=""): # size_category, kmeans_category を削除
         """
         ファイルメタデータ（とオプションでCLIP特徴量）をデータベースに挿入または更新します。
         file_pathが既に存在する場合は更新、存在しない場合は新規挿入します。
@@ -112,30 +113,30 @@ class DBManager:
                     UPDATE file_metadata
                     SET last_modified = ?, size = ?, creation_time = ?,
                         clip_feature_blob = COALESCE(?, clip_feature_blob), -- ?がNULLでなければ更新、NULLなら既存値を保持
-                        tags = ?, size_category = ?, kmeans_category = ?
+                        tags = ?
                     WHERE file_path = ?
                 """
                 cursor.execute(update_query, (
                     last_modified, size, creation_time, clip_feature_blob,
-                    tags, size_category, kmeans_category, file_path
+                    tags, file_path
                 ))
             else:
                 # レコードが存在しない場合、新規挿入
                 insert_query = """
                     INSERT INTO file_metadata
-                    (file_path, last_modified, size, creation_time, clip_feature_blob, tags, size_category, kmeans_category)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (file_path, last_modified, size, creation_time, clip_feature_blob, tags)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 """
                 cursor.execute(insert_query, (
                     file_path, last_modified, size, creation_time, clip_feature_blob,
-                    tags, size_category, kmeans_category
+                    tags
                 ))
             self.conn.commit()
             return True
         except sqlite3.Error as e:
             print(f"データベース操作エラー: {e}", file=sys.stderr)
             return False
-    # get_all_file_metadata から size_category, kmeans_category を削除
+
     def get_all_file_metadata(self):
         """file_metadataテーブルから全てのファイルパスと関連情報を取得します。
            clip_feature_blobもBLOBとして返します。"""
@@ -169,16 +170,25 @@ class DBManager:
         """
         if not data_to_update:
             return
+        
+        # update_file_metadataから除外するカラムを定義
+        # ここではsize_categoryとkmeans_categoryがテーブルに存在しないことを想定
+        excluded_columns = ['size_category', 'kmeans_category']
 
         set_clauses = []
         values = []
         for col, val in data_to_update.items():
+            if col in excluded_columns: # 除外するカラムであればスキップ
+                continue
             set_clauses.append(f"{col} = ?")
             if col == 'clip_feature_blob' and isinstance(val, np.ndarray):
                 values.append(numpy_to_blob(val))
             else:
                 values.append(val)
         
+        if not set_clauses: # 更新対象のカラムがなければ何もしない
+            return
+
         values.append(file_path) # WHERE句の値
 
         sql = f"UPDATE file_metadata SET {', '.join(set_clauses)} WHERE file_path = ?"
@@ -191,8 +201,11 @@ class DBManager:
             print(f"ファイルメタデータの更新エラー ({file_path}): {e}", file=sys.stderr)
             raise # エラーを上位に伝える
 
-    def get_file_metadata_by_path(self, file_path):
-        """特定のファイルパスのメタデータを取得します。"""
+    def get_file_metadata(self, file_path: str): # get_file_metadata_by_path をリネーム
+        """
+        特定のファイルパスのメタデータを取得します。
+        見つからない場合はNoneを返します。
+        """
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM file_metadata WHERE file_path = ?", (file_path,))
         row = cursor.fetchone()
@@ -241,8 +254,6 @@ class DBManager:
                 sys.stdout.write(f"\r...進捗 (特徴量保存): {i + 1}/{total_to_save}")
                 sys.stdout.flush()
 
-        # update_file_metadata が個別にコミットするので、ここでは不要だが念のため
-        # self.conn.commit() 
         print(f"\nCLIP特徴量の保存が完了しました。成功: {saved_count} ファイル")
 
     def add_tag_to_file(self, file_path, tag_name):
@@ -253,7 +264,7 @@ class DBManager:
         
         try:
             # 既存のタグを取得
-            metadata = self.get_file_metadata_by_path(file_path)
+            metadata = self.get_file_metadata(file_path) # get_file_metadata を使用
             current_tags_str = metadata.get('tags', '') if metadata else '' # metadataがNoneの場合も考慮
             current_tags = [t.strip() for t in current_tags_str.split(',') if t.strip()]
             
@@ -283,9 +294,7 @@ class DBManager:
         cursor = self.conn.cursor()
         
         # IN句の最大数に注意。SQLiteは1000がデフォルト。多数のパスがある場合は分割してクエリ発行が必要
-        # 簡単のためここでは直接IN句を使うが、実際の使用ではチャンクに分けるべき
         placeholders = ','.join('?' * len(file_paths))
-        # clip_features テーブルは削除されたので、file_metadata から取得
         query = f"SELECT file_path, clip_feature_blob FROM file_metadata WHERE file_path IN ({placeholders})"
         
         try:
@@ -299,63 +308,3 @@ class DBManager:
             print(f"データベースからの特徴量読み込みエラー: {e}", file=sys.stderr)
         
         return features_map
-
-# if __name__ == '__main__':
-#     # テスト用DBファイル
-#     test_db_path = 'test_image_features.db'
-#     if os.path.exists(test_db_path):
-#         os.remove(test_db_path)
-
-#     db_manager = DBManager(test_db_path)
-
-#     # ダミーデータの挿入
-#     dummy_feature1 = np.random.rand(512).astype(np.float32)
-#     dummy_feature2 = np.random.rand(512).astype(np.float32)
-
-#     db_manager.insert_or_update_file_metadata(
-#         file_path='C:/path/to/image1.jpg',
-#         last_modified=1678886400.0,
-#         size=1024,
-#         creation_time=1678886000.0,
-#         clip_feature=dummy_feature1
-#     )
-#     db_manager.insert_or_update_file_metadata(
-#         file_path='C:/path/to/image2.png',
-#         last_modified=1678886500.0,
-#         size=512,
-#         creation_time=1678886100.0,
-#         clip_feature=dummy_feature2
-#     )
-#     db_manager.insert_or_update_file_metadata(
-#         file_path='C:/path/to/image3.gif',
-#         last_modified=1678886600.0,
-#         size=256,
-#         creation_time=1678886200.0,
-#         clip_feature=None # 特徴量がNULLのケース
-#     )
-
-#     print(f"総画像数: {db_manager.get_total_image_count()}")
-
-#     # 特徴量がないファイルを取得
-#     no_feature_files = db_manager.get_file_paths_without_clip_features()
-#     print(f"特徴量がないファイル: {no_feature_files}")
-
-#     # 特徴量がないファイルに特徴量を追加するシミュレーション
-#     if no_feature_files:
-#         print(f"特徴量がないファイルに特徴量を更新中: {no_feature_files[0]}")
-#         new_feature = np.random.rand(512).astype(np.float32)
-#         db_manager.update_file_metadata(no_feature_files[0], {'clip_feature_blob': new_feature})
-    
-#     # タグの追加テスト
-#     db_manager.add_tag_to_file('C:/path/to/image1.jpg', 'tag1')
-#     db_manager.add_tag_to_file('C:/path/to/image1.jpg', 'tag2') # 複数タグ追加
-#     db_manager.add_tag_to_file('C:/path/to/image2.png', 'tag2')
-    
-#     # 全メタデータの取得テスト
-#     all_metadata = db_manager.get_all_file_metadata()
-#     print("\n全ファイルメタデータ:")
-#     for meta in all_metadata:
-#         print(meta)
-
-#     db_manager.close()
-#     print(f"テストDB '{test_db_path}' を閉じました。")

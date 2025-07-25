@@ -3,7 +3,7 @@ import os
 import json
 import sqlite3
 import numpy as np
-import time # ファイルのタイムスタンプ取得用
+import time
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -165,48 +165,58 @@ class ImageAddSignalEmitter(QObject):
 
 class ImageAdder(QRunnable):
     """画像ファイルをデータベースに追加するタスク"""
-    def __init__(self, db_manager: DBManager, image_paths: list, signal_emitter: ImageAddSignalEmitter):
+    def __init__(self, db_path: str, image_paths: list, signal_emitter: ImageAddSignalEmitter):
         super().__init__()
-        self.db_manager = db_manager
+        self.db_path = db_path # DBManagerインスタンスではなくパスを受け取る
         self.image_paths = image_paths
         self.signal_emitter = signal_emitter
+        self.db_manager = None # 各スレッドで個別にインスタンス化
 
     def run(self):
         added_count = 0
         total_files = len(self.image_paths)
         self.signal_emitter.progress_update.emit(f"データベースに {total_files} 個の画像を追加中...")
 
-        for i, file_path in enumerate(self.image_paths):
-            if not os.path.exists(file_path):
-                self.signal_emitter.progress_update.emit(f"警告: ファイルが見つかりません。スキップします: {file_path}")
-                continue
+        try:
+            self.db_manager = DBManager(self.db_path) # スレッド内でDBManagerをインスタンス化
             
-            try:
-                # ファイルのメタデータを取得
-                stat_info = os.stat(file_path)
-                file_size = stat_info.st_size
-                creation_time = stat_info.st_ctime
-                last_modified_time = stat_info.st_mtime
+            for i, file_path in enumerate(self.image_paths):
+                if not os.path.exists(file_path):
+                    self.signal_emitter.progress_update.emit(f"警告: ファイルが見つかりません。スキップします: {file_path}")
+                    continue
+                
+                try:
+                    # ファイルのメタデータを取得
+                    stat_info = os.stat(file_path)
+                    file_size = stat_info.st_size
+                    creation_time = stat_info.st_ctime
+                    last_modified_time = stat_info.st_mtime
 
-                # データベースに挿入または更新 (CLIP特徴量はここではNone)
-                self.db_manager.insert_or_update_file_metadata(
-                    file_path=file_path,
-                    last_modified=last_modified_time,
-                    size=file_size,
-                    creation_time=creation_time,
-                    clip_feature_blob=None, # ここでは特徴量を追加しない
-                    tags="", # 新規追加時はタグは空
-                    size_category="",
-                    kmeans_category=""
-                )
-                added_count += 1
-                self.signal_emitter.progress_update.emit(f"追加中: {added_count}/{total_files} ({os.path.basename(file_path)})")
-            except Exception as e:
-                error_msg = f"ERROR: ファイル '{file_path}' の追加中にエラーが発生しました: {e}"
-                print(error_msg, file=sys.stderr)
-                self.signal_emitter.error.emit(f"ファイル追加エラー ({os.path.basename(file_path)}): {e}")
-        
-        self.signal_emitter.finished.emit(added_count)
+                    # データベースに挿入または更新 (CLIP特徴量はここではNone)
+                    self.db_manager.insert_or_update_file_metadata(
+                        file_path=file_path,
+                        last_modified=last_modified_time,
+                        size=file_size,
+                        creation_time=creation_time,
+                        clip_feature_blob=None, # ここでは特徴量を追加しない
+                        tags="", # 新規追加時はタグは空
+                    )
+                    added_count += 1
+                    self.signal_emitter.progress_update.emit(f"追加中: {added_count}/{total_files} ({os.path.basename(file_path)})")
+                except Exception as e:
+                    error_msg = f"ERROR: ファイル '{file_path}' の追加中にエラーが発生しました: {e}"
+                    print(error_msg, file=sys.stderr)
+                    self.signal_emitter.error.emit(f"ファイル追加エラー ({os.path.basename(file_path)}): {e}")
+            
+            self.signal_emitter.finished.emit(added_count)
+        except Exception as e:
+            # DBManagerインスタンス化またはループ中の致命的なエラー
+            error_msg = f"データベース処理の初期化または実行中にエラーが発生しました: {e}"
+            print(error_msg, file=sys.stderr)
+            self.signal_emitter.error.emit(error_msg)
+        finally:
+            if self.db_manager:
+                self.db_manager.close() # 処理終了時に接続を閉じる
 
 
 # --- 4. メインアプリケーションウィンドウ ---
@@ -220,7 +230,7 @@ class ImageFeatureViewerApp(QMainWindow):
         self.setGeometry(100, 100, 1200, 800)
 
         self.db_path = None
-        self.db_manager = None
+        self.db_manager = None # メインスレッドでのDBManagerインスタンス
         self.clip_feature_extractor = None
 
         self.top_n_display_count = 1000 
@@ -409,7 +419,8 @@ class ImageFeatureViewerApp(QMainWindow):
                 self.db_manager.close()
             
             self.db_path = db_path
-            self.db_manager = DBManager(self.db_path)
+            # メインスレッド用のDBManagerインスタンス
+            self.db_manager = DBManager(self.db_path) 
             if self.clip_feature_extractor is None:
                 self.clip_feature_extractor = CLIPFeatureExtractor()
 
@@ -476,7 +487,7 @@ class ImageFeatureViewerApp(QMainWindow):
                 return
 
             results = []
-            all_db_data = self.db_manager.get_all_file_metadata()
+            all_db_data = self.db_manager.get_all_file_metadata() # メインスレッドからアクセス
 
             for item in all_db_data:
                 file_path = item.get('file_path')
@@ -519,6 +530,7 @@ class ImageFeatureViewerApp(QMainWindow):
         QApplication.processEvents()
         
         try:
+            # メインスレッドからDBManagerを使ってファイルパスを取得
             files_without_features = self.db_manager.get_file_paths_without_clip_features()
             
             if not files_without_features:
@@ -528,6 +540,8 @@ class ImageFeatureViewerApp(QMainWindow):
             self.status_bar.showMessage(f"{len(files_without_features)} 個のファイルの特徴量を抽出中...")
             QApplication.processEvents()
 
+            # 特徴量抽出はCLIPFeatureExtractorが内部でスレッドセーフに処理すると仮定
+            # または、必要であればこれもQRunnableでラップする必要があるかもしれません
             extracted_features, processed_indices = self.clip_feature_extractor.extract_features_from_paths(files_without_features)
             
             if len(extracted_features) == 0:
@@ -535,6 +549,8 @@ class ImageFeatureViewerApp(QMainWindow):
                 return
 
             updated_count = 0
+            # メインスレッドのDBManagerを使って更新
+            # 大量更新の場合は、DBManagerにバッチ更新メソッドを追加すると効率的
             for i, original_index in enumerate(processed_indices):
                 file_path = files_without_features[original_index]
                 feature_blob = numpy_to_blob(extracted_features[i])
@@ -620,7 +636,7 @@ class ImageFeatureViewerApp(QMainWindow):
             event.ignore()
 
     def dropEvent(self, event):
-        if not self.db_manager:
+        if not self.db_manager: # メインスレッドのDBManagerが存在するか確認
             QMessageBox.warning(self, "エラー", "DBが開かれていません。先にDBを開くか作成してください。")
             event.ignore()
             return
@@ -667,8 +683,8 @@ class ImageFeatureViewerApp(QMainWindow):
                         for file_name in files:
                             if file_name.lower().endswith(self.SUPPORTED_IMAGE_EXTENSIONS):
                                 full_path = os.path.join(root, file_name)
-                                # 既にDBにあるファイルはスキップ
-                                if not self.db_manager.get_file_metadata(full_path):
+                                # 既にDBにあるファイルはスキップ (メインスレッドのDBManagerを使用)
+                                if not self.db_manager.get_file_metadata(full_path): 
                                     image_paths_to_add.append(full_path)
                         if not recursive:
                             break
@@ -681,13 +697,13 @@ class ImageFeatureViewerApp(QMainWindow):
                     event.acceptProposedAction()
                     return
 
-                # ImageAdderを起動
+                # ImageAdderを起動 (db_pathを渡す)
                 adder_emitter = ImageAddSignalEmitter()
                 adder_emitter.progress_update.connect(self.status_bar.showMessage)
                 adder_emitter.finished.connect(self._on_image_add_finished)
                 adder_emitter.error.connect(lambda msg: QMessageBox.warning(self, "ファイル追加エラー", msg))
 
-                adder = ImageAdder(self.db_manager, image_paths_to_add, adder_emitter)
+                adder = ImageAdder(self.db_path, image_paths_to_add, adder_emitter) # db_pathを渡す
                 self.thread_pool.start(adder)
                 self.status_bar.showMessage(f"{len(image_paths_to_add)} 個の画像のデータベースへの追加を開始しました...")
 
@@ -702,8 +718,8 @@ class ImageFeatureViewerApp(QMainWindow):
         """ImageAdderからの完了シグナルを受け取った際の処理"""
         self.status_bar.showMessage(f"データベースに {added_count} 個の画像を追加しました。")
         QMessageBox.information(self, "画像追加完了", f"データベースに {added_count} 個の画像を新規追加しました。")
-        # データベースの総画像数を更新して表示
-        total_count = self.db_manager.get_total_image_count()
+        # データベースの総画像数を更新して表示 (メインスレッドのDBManagerを使用)
+        total_count = self.db_manager.get_total_image_count() 
         self.status_bar.showMessage(f"データベース更新完了。全画像数: {total_count}")
         # テーブル表示を更新（必要であれば全件表示をリフレッシュ）
         self._display_all_images_from_db()
@@ -714,7 +730,7 @@ class ImageFeatureViewerApp(QMainWindow):
         if not self.db_manager:
             return
         try:
-            all_db_data = self.db_manager.get_all_file_metadata()
+            all_db_data = self.db_manager.get_all_file_metadata() # メインスレッドのDBManagerを使用
             total_count = len(all_db_data)
             # スコアなしで表示する場合（または適当なデフォルトスコア）
             for item in all_db_data:

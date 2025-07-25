@@ -3,9 +3,10 @@
     "similarity_threshold": 0.25,
     "recent_db_paths": [
         "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/test726.txt.db",
+        "G:/マイドライブ/linux/image_processing/test.db",
         "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/37pixiv.txt.db"
     ],
     "last_opened_db_path": "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/test726.txt.db",
-    "window_x": 327,
+    "window_x": 279,
     "window_y": 1164
 }
