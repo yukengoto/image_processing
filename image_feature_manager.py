@@ -3,11 +3,11 @@ import os
 import json
 import sqlite3
 import numpy as np
-import hashlib # これはキャッシュキー生成で使われるが、今回はディスクキャッシュ廃止のため不要になる
+#import hashlib # ディスクキャッシュ削除のため不要
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QTableView, QLineEdit, QHeaderView,
-    QStatusBar, QAbstractItemView, QMessageBox, QInputDialog
+    QStatusBar, QAbstractItemView, QMessageBox, QInputDialog, QMenu # QMenuをインポート
 )
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, Qt, QSize,
@@ -75,12 +75,11 @@ class ImageTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._data = []
         self._total_image_count = 0 # フィルタリング前の全画像数
-        self._headers = ["", "ファイル名", "パス", "類似度", "タグ"] # ヘッダーに「タグ」を追加
+        # ★修正点: ヘッダーの順序を変更
+        self._headers = ["", "ファイル名", "類似度", "タグ", "パス"] 
         self.thumbnail_cache = {} # インメモリキャッシュは保持
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(os.cpu_count() or 1) # スレッドプール数をCPUコア数に設定
-        # self.thumbnail_cache_dir = "thumbnail_cache" # ディスクキャッシュ削除のため不要
-        # os.makedirs(self.thumbnail_cache_dir, exist_ok=True) # ディスクキャッシュ削除のため不要
         
         self.thumbnail_signal_emitter = ThumbnailSignalEmitter()
         self.thumbnail_signal_emitter.thumbnail_ready.connect(self.update_thumbnail)
@@ -110,16 +109,17 @@ class ImageTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole:
             if col == 0: # サムネイル列
                 return "" # サムネイル自体はDecorationRoleで描画されるため空文字
+            # ★修正点: 列のインデックスを変更
             elif col == 1: # ファイル名
                 return os.path.basename(item_data.get('file_path', ''))
-            elif col == 2: # パス
-                return item_data.get('file_path', '')
-            elif col == 3: # 類似度
+            elif col == 2: # 類似度
                 score = item_data.get('score')
                 return f"{score:.4f}" if score is not None else ""
-            elif col == 4: # タグ列
+            elif col == 3: # タグ列
                 tags = item_data.get('tags', '') # タグデータを取得
                 return tags if tags else "" # タグがあれば表示、なければ空文字列
+            elif col == 4: # パス
+                return item_data.get('file_path', '')
 
         elif role == Qt.ItemDataRole.DecorationRole and col == 0: # サムネイル列
             file_path = item_data.get('file_path')
@@ -131,18 +131,26 @@ class ImageTableModel(QAbstractTableModel):
                     generator = ThumbnailGenerator(
                         image_path=file_path,
                         size=QSize(100, 100), # ★ここはこのままで、行の高さで調整
-                        # cache_dir=self.thumbnail_cache_dir, # ディスクキャッシュ削除のため不要
                         index=index,
                         signal_emitter=self.thumbnail_signal_emitter
                     )
                     self.thread_pool.start(generator)
                 return QPixmap() # ロード中は空のPixmapを返す
+        
+        # ★修正点: ヘッダーの左寄せ
+        elif role == Qt.ItemDataRole.TextAlignmentRole:
+            if col == 0: # サムネイル列は中央寄せ
+                return Qt.AlignmentFlag.AlignCenter
+            return Qt.AlignmentFlag.AlignLeft # それ以外の列は左寄せ
 
         return None
 
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
         if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
             return self._headers[section]
+        # ★修正点: ヘッダーの左寄せ
+        elif role == Qt.ItemDataRole.TextAlignmentRole:
+            return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter # ヘッダーテキストも左寄せ
         return None
 
     def update_thumbnail(self, index: QModelIndex, pixmap: QPixmap):
@@ -224,9 +232,9 @@ class ImageFeatureViewerApp(QMainWindow):
         header = self.table_view.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed) # サムネイル列は固定
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch) # ファイル名は伸縮
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # パスは内容に合わせる
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # 類似度
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch) # タグは伸縮
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # 類似度
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch) # タグは伸縮
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # パスは内容に合わせる
         self.table_view.setColumnWidth(0, 100) # サムネイル列の幅を調整
 
         # ★行の高さをサムネイルサイズに合わせて調整
@@ -243,11 +251,16 @@ class ImageFeatureViewerApp(QMainWindow):
         menubar = self.menuBar()
         file_menu = menubar.addMenu("ファイル")
 
+        # ★修正点: 新しいDB作成アクションを追加
+        create_new_db_action = file_menu.addAction("新しいDBを作成...")
+        create_new_db_action.triggered.connect(self._create_new_db_file)
+
         open_action = file_menu.addAction("DBを開く...")
         open_action.triggered.connect(self._open_db_file_dialog)
 
-        # Recent Files メニュー
-        self.recent_files_menu = menubar.addMenu("最近開いたファイル")
+        # ★修正点: Recent Files メニューをFileメニューのサブメニューにする
+        self.recent_files_menu = QMenu("最近開いたファイル", self) # QMenuとしてインスタンス化
+        file_menu.addMenu(self.recent_files_menu) # ファイルメニューに追加
         self.recent_files_menu.aboutToShow.connect(self._populate_recent_files_menu) # メニュー表示時に更新
 
         file_menu.addSeparator()
@@ -334,6 +347,28 @@ class ImageFeatureViewerApp(QMainWindow):
         if len(self.recent_db_paths) > max_recent:
             self.recent_db_paths = self.recent_db_paths[:max_recent]
 
+    # ★修正点: 新しいDBファイルを作成するメソッド
+    def _create_new_db_file(self):
+        options = QFileDialog.Option.DontUseNativeDialog
+        # ユーザーに保存先とファイル名を入力させる
+        db_path, _ = QFileDialog.getSaveFileName(self, "新しいDBファイルを作成", "", "SQLite Databases (*.db);;All Files (*)", options=options)
+        if db_path:
+            if not db_path.lower().endswith(".db"):
+                db_path += ".db" # .db拡張子がなければ追加
+
+            # ファイルが既に存在する場合は警告し、上書きを確認
+            if os.path.exists(db_path):
+                reply = QMessageBox.question(self, "確認", 
+                                             f"指定されたDBファイルは既に存在します。\n'{os.path.basename(db_path)}'\n上書きしますか？",
+                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if reply == QMessageBox.StandardButton.No:
+                    return
+
+            # 新しいDBファイルを開く（DBManagerが初期化をハンドルする）
+            self._open_db(db_path)
+            self.status_bar.showMessage(f"新しいデータベース '{os.path.basename(db_path)}' を作成し、開きました。")
+
+
     def _open_db_file_dialog(self):
         options = QFileDialog.Option.DontUseNativeDialog
         db_path, _ = QFileDialog.getOpenFileName(self, "DBファイルを開く", "", "SQLite Databases (*.db);;All Files (*)", options=options)
@@ -341,7 +376,7 @@ class ImageFeatureViewerApp(QMainWindow):
             self._open_db(db_path)
 
     def _open_db(self, db_path):
-        if not os.path.exists(db_path):
+        if not os.path.exists(db_path) and not db_path.endswith(".db"): # 新規作成時など、存在しないが.dbで終わるパスを許容
             QMessageBox.warning(self, "エラー", f"指定されたDBファイルが見つかりません:\n{db_path}")
             return
 
@@ -351,7 +386,7 @@ class ImageFeatureViewerApp(QMainWindow):
                 self.db_manager.close()
             
             self.db_path = db_path
-            self.db_manager = DBManager(self.db_path)
+            self.db_manager = DBManager(self.db_path) # DBManagerがDBの初期化/作成をハンドルする
             # CLIPFeatureExtractorはDBManagerとは独立してインスタンス化
             if self.clip_feature_extractor is None:
                 self.clip_feature_extractor = CLIPFeatureExtractor()

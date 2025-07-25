@@ -2,9 +2,10 @@
     "top_n_display_count": 1000,
     "similarity_threshold": 0.25,
     "recent_db_paths": [
+        "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/test726.txt.db",
         "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/37pixiv.txt.db"
     ],
-    "last_opened_db_path": "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/37pixiv.txt.db",
-    "window_x": 99,
-    "window_y": 1264
+    "last_opened_db_path": "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/test726.txt.db",
+    "window_x": 2122,
+    "window_y": 657
 }
