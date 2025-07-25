@@ -3,8 +3,7 @@ import os
 import json
 import sqlite3
 import numpy as np
-import hashlib
-from PIL import Image # サムネイル生成用 (pip install Pillow)
+import hashlib # これはキャッシュキー生成で使われるが、今回はディスクキャッシュ廃止のため不要になる
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QTableView, QLineEdit, QHeaderView,
@@ -27,25 +26,17 @@ class ThumbnailSignalEmitter(QObject):
     error = Signal(str)
 
 class ThumbnailGenerator(QRunnable):
-    """画像を読み込み、サムネイルを生成してキャッシュするタスク"""
-    def __init__(self, image_path, size, cache_dir, index, signal_emitter):
+    """画像を読み込み、サムネイルを生成するタスク (ディスクキャッシュなし)"""
+    def __init__(self, image_path, size, index, signal_emitter): # cache_dir引数を削除
         super().__init__()
         self.image_path = image_path
         self.size = size
-        self.cache_dir = cache_dir
         self.index = index
         self.signal_emitter = signal_emitter
-        self.cache_path = os.path.join(cache_dir, hashlib.md5(image_path.encode()).hexdigest() + ".png")
+        # self.cache_path = os.path.join(cache_dir, hashlib.md5(image_path.encode()).hexdigest() + ".png") # ディスクキャッシュ削除のため不要
 
     def run(self):
         try:
-            # キャッシュから読み込みを試みる
-            if os.path.exists(self.cache_path):
-                pixmap = QPixmap(self.cache_path)
-                if not pixmap.isNull():
-                    self.signal_emitter.thumbnail_ready.emit(self.index, pixmap)
-                    return
-
             # 画像ファイルが存在するか最終確認
             if not os.path.exists(self.image_path):
                 error_msg = f"ERROR: サムネイル生成を試みましたが、ファイルが見つかりません: {self.image_path}"
@@ -53,18 +44,23 @@ class ThumbnailGenerator(QRunnable):
                 self.signal_emitter.error.emit(f"ファイルが見つかりません: {os.path.basename(self.image_path)}")
                 return
 
-            # 画像が破損している可能性があるのでtry-exceptで囲む
-            img = Image.open(self.image_path).convert("RGB")
-            # 修正: QSizeオブジェクトから幅と高さを抽出し、タプルとして渡す
-            img.thumbnail((self.size.width(), self.size.height()), Image.Resampling.LANCZOS) # より高品質なリサンプリング
+            # ★修正点: PILを使わず、QPixmapで直接画像をロードし、リサイズ
+            original_pixmap = QPixmap(self.image_path)
+            
+            if original_pixmap.isNull():
+                raise ValueError(f"画像をロードできませんでした (QPixmap.isNull()): {self.image_path}")
 
-            # PySide6/Qtで表示するためにQImageに変換
-            data = img.tobytes("raw", "RGB")
-            qimage = QImage(data, img.size[0], img.size[1], QImage.Format.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimage)
+            # アスペクト比を維持しつつ、高品質な変換でリサイズ
+            pixmap = original_pixmap.scaled(
+                self.size,
+                Qt.AspectRatioMode.KeepAspectRatio, # アスペクト比を維持
+                Qt.TransformationMode.SmoothTransformation # 高品質なスケーリング
+            )
+            
+            if pixmap.isNull():
+                raise ValueError(f"QPixmapのリサイズに失敗しました: {self.image_path}")
 
-            # キャッシュに保存
-            pixmap.save(self.cache_path)
+            # pixmap.save(self.cache_path) # ディスクキャッシュ削除のため不要
 
             self.signal_emitter.thumbnail_ready.emit(self.index, pixmap)
         except Exception as e:
@@ -80,11 +76,11 @@ class ImageTableModel(QAbstractTableModel):
         self._data = []
         self._total_image_count = 0 # フィルタリング前の全画像数
         self._headers = ["", "ファイル名", "パス", "類似度", "タグ"] # ヘッダーに「タグ」を追加
-        self.thumbnail_cache = {}
+        self.thumbnail_cache = {} # インメモリキャッシュは保持
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(os.cpu_count() or 1) # スレッドプール数をCPUコア数に設定
-        self.thumbnail_cache_dir = "thumbnail_cache"
-        os.makedirs(self.thumbnail_cache_dir, exist_ok=True)
+        # self.thumbnail_cache_dir = "thumbnail_cache" # ディスクキャッシュ削除のため不要
+        # os.makedirs(self.thumbnail_cache_dir, exist_ok=True) # ディスクキャッシュ削除のため不要
         
         self.thumbnail_signal_emitter = ThumbnailSignalEmitter()
         self.thumbnail_signal_emitter.thumbnail_ready.connect(self.update_thumbnail)
@@ -94,7 +90,7 @@ class ImageTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._data = data
         self._total_image_count = total_count
-        self.thumbnail_cache.clear() # データ更新時にキャッシュをクリア
+        self.thumbnail_cache.clear() # データ更新時にインメモリキャッシュをクリア
         self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()):
@@ -127,7 +123,7 @@ class ImageTableModel(QAbstractTableModel):
 
         elif role == Qt.ItemDataRole.DecorationRole and col == 0: # サムネイル列
             file_path = item_data.get('file_path')
-            if file_path in self.thumbnail_cache:
+            if file_path in self.thumbnail_cache: # インメモリキャッシュを確認
                 return self.thumbnail_cache[file_path]
             else:
                 # サムネイルがない場合、バックグラウンドで生成をリクエスト
@@ -135,7 +131,7 @@ class ImageTableModel(QAbstractTableModel):
                     generator = ThumbnailGenerator(
                         image_path=file_path,
                         size=QSize(100, 100), # ★ここはこのままで、行の高さで調整
-                        cache_dir=self.thumbnail_cache_dir,
+                        # cache_dir=self.thumbnail_cache_dir, # ディスクキャッシュ削除のため不要
                         index=index,
                         signal_emitter=self.thumbnail_signal_emitter
                     )
@@ -151,7 +147,7 @@ class ImageTableModel(QAbstractTableModel):
 
     def update_thumbnail(self, index: QModelIndex, pixmap: QPixmap):
         file_path = self._data[index.row()].get('file_path')
-        self.thumbnail_cache[file_path] = pixmap
+        self.thumbnail_cache[file_path] = pixmap # インメモリキャッシュに保存
         self.dataChanged.emit(index, index, [Qt.ItemDataRole.DecorationRole])
 
     def get_row_data(self, row: int):
@@ -174,7 +170,7 @@ class ImageFeatureViewerApp(QMainWindow):
 
         self.db_path = None
         self.db_manager = None # DBManagerのインスタンス
-        self.clip_feature_extractor = None # CLIPFeatureExtractorのインスタンス
+        self.clip_feature_extractor = None # CLIP特徴量抽出器のインスタンス
 
         # デフォルトの設定値
         self.top_n_display_count = 1000 
@@ -189,8 +185,6 @@ class ImageFeatureViewerApp(QMainWindow):
 
         self._init_ui()
         self._init_menu() # メニューバーの初期化
-
-        # DBパスの読み込みロジックは_load_settingsに統合されたため不要
 
     def _init_ui(self):
         central_widget = QWidget()
