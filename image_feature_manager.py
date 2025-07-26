@@ -15,7 +15,7 @@ from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, Qt, QSize,
     QThreadPool, QRunnable, Signal, QObject, QUrl
 )
-from PySide6.QtGui import QPixmap, QImage, QDesktopServices
+from PySide6.QtGui import QPixmap, QImage, QDesktopServices, QIntValidator # QIntValidatorを追加
 
 # --- 新しいモジュールのインポート ---
 from db_manager import DBManager, blob_to_numpy, numpy_to_blob
@@ -274,8 +274,9 @@ class ImageFeatureViewerApp(QMainWindow):
         self.search_button = QPushButton("検索")
         self.search_button.clicked.connect(self._perform_search)
         
-        self.open_db_button = QPushButton("DBを開く")
-        self.open_db_button.clicked.connect(self._open_db_file_dialog)
+        # Removed self.open_db_button from here as it's in the menu
+        # self.open_db_button = QPushButton("DBを開く")
+        # self.open_db_button.clicked.connect(self._open_db_file_dialog)
 
         self.acquire_features_button = QPushButton("特徴量がないファイルを取得")
         self.acquire_features_button.clicked.connect(self._acquire_missing_features)
@@ -283,27 +284,30 @@ class ImageFeatureViewerApp(QMainWindow):
 
         search_layout.addWidget(self.search_input)
         search_layout.addWidget(self.search_button)
-        search_layout.addWidget(self.open_db_button)
+        # search_layout.addWidget(self.open_db_button) # Removed
         search_layout.addWidget(self.acquire_features_button)
-        main_layout.addLayout(search_layout)
-
-        # Thumbnail size controls layout
-        thumbnail_size_layout = QHBoxLayout()
-        thumbnail_size_layout.addWidget(QLabel("サムネイルサイズ:"))
+        
+        # Add thumbnail size controls to the far right of search_layout
+        search_layout.addStretch(1) # Pushes subsequent widgets to the right
+        search_layout.addWidget(QLabel("サムネイルサイズ:"))
         self.thumbnail_size_slider = QSlider(Qt.Horizontal)
-        self.thumbnail_size_slider.setRange(50, 300) # Min 50, Max 300 pixels
+        self.thumbnail_size_slider.setRange(50, 400) # Min 50, Max 400 pixels
+        self.thumbnail_size_slider.setSingleStep(50) # Step 50
+        self.thumbnail_size_slider.setTickPosition(QSlider.TicksBelow) # Show ticks
+        self.thumbnail_size_slider.setTickInterval(50) # Ticks at 50, 100, etc.
         self.thumbnail_size_slider.setValue(self.thumbnail_size)
-        self.thumbnail_size_slider.setToolTip("サムネイルサイズを調整します")
+        self.thumbnail_size_slider.setFixedWidth(120) # Make slider smaller
         self.thumbnail_size_slider.valueChanged.connect(self._on_thumbnail_size_changed)
         
         self.thumbnail_size_input = QLineEdit(str(self.thumbnail_size))
-        self.thumbnail_size_input.setFixedWidth(50)
-        self.thumbnail_size_input.setValidator(QIntValidator(50, 300)) # Ensure valid input range
+        self.thumbnail_size_input.setFixedWidth(40) # Make input smaller
+        self.thumbnail_size_input.setValidator(QIntValidator(50, 400)) # Ensure valid input range
         self.thumbnail_size_input.editingFinished.connect(self._on_thumbnail_size_changed)
 
-        thumbnail_size_layout.addWidget(self.thumbnail_size_slider)
-        thumbnail_size_layout.addWidget(self.thumbnail_size_input)
-        main_layout.addLayout(thumbnail_size_layout)
+        search_layout.addWidget(self.thumbnail_size_slider)
+        search_layout.addWidget(self.thumbnail_size_input)
+        
+        main_layout.addLayout(search_layout)
 
 
         self.model = ImageTableModel(self, initial_thumbnail_size=self.thumbnail_size) # Pass initial size
@@ -314,11 +318,11 @@ class ImageFeatureViewerApp(QMainWindow):
         self.table_view.doubleClicked.connect(self._open_file_on_double_click)
 
         header = self.table_view.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed) # Thumbnail column fixed
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive) # ファイル名
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive) # 類似度
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive) # タグ
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive) # パス
         self.table_view.setColumnWidth(0, self.thumbnail_size) # Set initial thumbnail column width
 
         self.table_view.verticalHeader().setDefaultSectionSize(self.thumbnail_size + 5) # Set initial row height
@@ -491,10 +495,11 @@ class ImageFeatureViewerApp(QMainWindow):
         else: # Value from QLineEdit (editingFinished)
             try:
                 line_edit_value = int(self.thumbnail_size_input.text())
-                if 50 <= line_edit_value <= 300: # Validate input range
+                # Use updated range for validation
+                if 50 <= line_edit_value <= 400: 
                     new_size = line_edit_value
                 else:
-                    QMessageBox.warning(self, "入力エラー", "サムネイルサイズは50から300の範囲で入力してください。")
+                    QMessageBox.warning(self, "入力エラー", "サムネイルサイズは50から400の範囲で入力してください。")
                     self.thumbnail_size_input.setText(str(self.thumbnail_size)) # Revert to current value
                     return
             except ValueError:
@@ -819,8 +824,6 @@ class ImageFeatureViewerApp(QMainWindow):
             self.db_manager.close()
         super().closeEvent(event)
 
-# For QIntValidator
-from PySide6.QtGui import QIntValidator
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
