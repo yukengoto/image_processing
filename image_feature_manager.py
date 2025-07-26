@@ -8,7 +8,8 @@ import time
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QTableView, QLineEdit, QHeaderView,
-    QStatusBar, QAbstractItemView, QMessageBox, QInputDialog, QMenu
+    QStatusBar, QAbstractItemView, QMessageBox, QInputDialog, QMenu,
+    QSlider, QLabel
 )
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, Qt, QSize,
@@ -28,7 +29,7 @@ class ThumbnailSignalEmitter(QObject):
 
 class ThumbnailGenerator(QRunnable):
     """画像を読み込み、サムネイルを生成するタスク (ディスクキャッシュなし)"""
-    def __init__(self, image_path, size, index, signal_emitter):
+    def __init__(self, image_path, size: QSize, index, signal_emitter):
         super().__init__()
         self.image_path = image_path
         self.size = size
@@ -65,7 +66,7 @@ class ThumbnailGenerator(QRunnable):
 
 # --- 2. データベースのデータと連携するカスタムテーブルモデル ---
 class ImageTableModel(QAbstractTableModel):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, initial_thumbnail_size=100):
         super().__init__(parent)
         self._data = []
         self._total_image_count = 0
@@ -77,6 +78,8 @@ class ImageTableModel(QAbstractTableModel):
         self.thumbnail_signal_emitter = ThumbnailSignalEmitter()
         self.thumbnail_signal_emitter.thumbnail_ready.connect(self.update_thumbnail)
         self.thumbnail_signal_emitter.error.connect(self.parent().statusBar().showMessage)
+        
+        self.thumbnail_size = QSize(initial_thumbnail_size, initial_thumbnail_size)
 
     def set_data(self, data, total_count):
         self.beginResetModel()
@@ -84,6 +87,14 @@ class ImageTableModel(QAbstractTableModel):
         self._total_image_count = total_count
         self.thumbnail_cache.clear()
         self.endResetModel()
+
+    def set_current_thumbnail_size(self, size_int: int):
+        new_size = QSize(size_int, size_int)
+        if self.thumbnail_size != new_size:
+            self.thumbnail_size = new_size
+            self.thumbnail_cache.clear() # Clear cache to force re-render
+            # Notify view to redraw decorations (thumbnails)
+            self.dataChanged.emit(self.index(0, 0), self.index(self.rowCount() - 1, self.columnCount() - 1), [Qt.ItemDataRole.DecorationRole])
 
     def rowCount(self, parent=QModelIndex()):
         return len(self._data)
@@ -121,7 +132,7 @@ class ImageTableModel(QAbstractTableModel):
                 if file_path and os.path.exists(file_path):
                     generator = ThumbnailGenerator(
                         image_path=file_path,
-                        size=QSize(100, 100),
+                        size=self.thumbnail_size, # Use current thumbnail size
                         index=index,
                         signal_emitter=self.thumbnail_signal_emitter
                     )
@@ -238,6 +249,7 @@ class ImageFeatureViewerApp(QMainWindow):
         self.recent_db_paths = []
         self.window_x = 100
         self.window_y = 100
+        self.thumbnail_size = 100 # Default thumbnail size
 
         self._load_settings()
 
@@ -255,6 +267,7 @@ class ImageFeatureViewerApp(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
+        # Search and DB controls layout
         search_layout = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("検索キーワードを入力...")
@@ -274,7 +287,26 @@ class ImageFeatureViewerApp(QMainWindow):
         search_layout.addWidget(self.acquire_features_button)
         main_layout.addLayout(search_layout)
 
-        self.model = ImageTableModel(self)
+        # Thumbnail size controls layout
+        thumbnail_size_layout = QHBoxLayout()
+        thumbnail_size_layout.addWidget(QLabel("サムネイルサイズ:"))
+        self.thumbnail_size_slider = QSlider(Qt.Horizontal)
+        self.thumbnail_size_slider.setRange(50, 300) # Min 50, Max 300 pixels
+        self.thumbnail_size_slider.setValue(self.thumbnail_size)
+        self.thumbnail_size_slider.setToolTip("サムネイルサイズを調整します")
+        self.thumbnail_size_slider.valueChanged.connect(self._on_thumbnail_size_changed)
+        
+        self.thumbnail_size_input = QLineEdit(str(self.thumbnail_size))
+        self.thumbnail_size_input.setFixedWidth(50)
+        self.thumbnail_size_input.setValidator(QIntValidator(50, 300)) # Ensure valid input range
+        self.thumbnail_size_input.editingFinished.connect(self._on_thumbnail_size_changed)
+
+        thumbnail_size_layout.addWidget(self.thumbnail_size_slider)
+        thumbnail_size_layout.addWidget(self.thumbnail_size_input)
+        main_layout.addLayout(thumbnail_size_layout)
+
+
+        self.model = ImageTableModel(self, initial_thumbnail_size=self.thumbnail_size) # Pass initial size
         self.table_view = QTableView()
         self.table_view.setModel(self.model)
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -287,9 +319,9 @@ class ImageFeatureViewerApp(QMainWindow):
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        self.table_view.setColumnWidth(0, 100)
+        self.table_view.setColumnWidth(0, self.thumbnail_size) # Set initial thumbnail column width
 
-        self.table_view.verticalHeader().setDefaultSectionSize(105)
+        self.table_view.verticalHeader().setDefaultSectionSize(self.thumbnail_size + 5) # Set initial row height
 
         main_layout.addWidget(self.table_view)
 
@@ -351,6 +383,7 @@ class ImageFeatureViewerApp(QMainWindow):
                     self.recent_db_paths = settings.get('recent_db_paths', [])
                     self.window_x = settings.get('window_x', self.window_x)
                     self.window_y = settings.get('window_y', self.window_y)
+                    self.thumbnail_size = settings.get('thumbnail_size', self.thumbnail_size) # Load thumbnail size
 
                     last_path = settings.get('last_opened_db_path')
                     if last_path and os.path.exists(last_path):
@@ -371,6 +404,7 @@ class ImageFeatureViewerApp(QMainWindow):
             'last_opened_db_path': self.db_path,
             'window_x': self.window_x,
             'window_y': self.window_y,
+            'thumbnail_size': self.thumbnail_size, # Save thumbnail size
         }
         try:
             with open(self.SETTINGS_FILE, 'w', encoding='utf-8') as f:
@@ -447,6 +481,39 @@ class ImageFeatureViewerApp(QMainWindow):
             self.filter_by_tag_action.setEnabled(False)
         except Exception as e:
             QMessageBox.critical(self, "初期化エラー", f"アプリケーションの初期化中にエラーが発生しました:\n{e}")
+
+    def _on_thumbnail_size_changed(self, value=None):
+        """サムネイルサイズのスライダーまたは入力フィールドが変更されたときのハンドラ"""
+        new_size = self.thumbnail_size
+
+        if isinstance(value, int): # Value from QSlider
+            new_size = value
+        else: # Value from QLineEdit (editingFinished)
+            try:
+                line_edit_value = int(self.thumbnail_size_input.text())
+                if 50 <= line_edit_value <= 300: # Validate input range
+                    new_size = line_edit_value
+                else:
+                    QMessageBox.warning(self, "入力エラー", "サムネイルサイズは50から300の範囲で入力してください。")
+                    self.thumbnail_size_input.setText(str(self.thumbnail_size)) # Revert to current value
+                    return
+            except ValueError:
+                QMessageBox.warning(self, "入力エラー", "有効な数値を入力してください。")
+                self.thumbnail_size_input.setText(str(self.thumbnail_size)) # Revert to current value
+                return
+        
+        # Ensure consistency across UI elements
+        if self.thumbnail_size != new_size:
+            self.thumbnail_size = new_size
+            self.thumbnail_size_slider.setValue(self.thumbnail_size)
+            self.thumbnail_size_input.setText(str(self.thumbnail_size))
+            self.status_bar.showMessage(f"サムネイルサイズを {self.thumbnail_size}px に設定しました。")
+
+            # Update model and view
+            self.model.set_current_thumbnail_size(self.thumbnail_size)
+            self.table_view.setColumnWidth(0, self.thumbnail_size)
+            self.table_view.verticalHeader().setDefaultSectionSize(self.thumbnail_size + 5)
+
 
     def _set_display_count(self):
         new_count, ok = QInputDialog.getInt(self, "表示件数を設定", "表示する画像の最大数:",
@@ -751,6 +818,9 @@ class ImageFeatureViewerApp(QMainWindow):
         if self.db_manager:
             self.db_manager.close()
         super().closeEvent(event)
+
+# For QIntValidator
+from PySide6.QtGui import QIntValidator
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
