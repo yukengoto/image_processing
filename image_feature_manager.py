@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QTableView, QLineEdit, QHeaderView,
     QStatusBar, QAbstractItemView, QMessageBox, QInputDialog, QMenu,
-    QSlider, QLabel
+    QSlider, QLabel, QComboBox
 )
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, Qt, QSize,
@@ -88,19 +88,19 @@ class ImageTableModel(QAbstractTableModel):
         self.thumbnail_cache.clear()
         self.endResetModel()
 
-    def set_current_thumbnail_size(self, size_int: int):
-        new_size = QSize(size_int, size_int)
-        if self.thumbnail_size != new_size:
-            self.thumbnail_size = new_size
-            self.thumbnail_cache.clear() # Clear cache to force re-render
-            # Notify view to redraw decorations (thumbnails)
-            self.dataChanged.emit(self.index(0, 0), self.index(self.rowCount() - 1, self.columnCount() - 1), [Qt.ItemDataRole.DecorationRole])
-
     def rowCount(self, parent=QModelIndex()):
         return len(self._data)
 
     def columnCount(self, parent=QModelIndex()):
         return len(self._headers)
+
+    def set_current_thumbnail_size(self, size_int: int):
+        new_size = QSize(size_int, size_int) if size_int > 0 else QSize(0, 0)
+        if self.thumbnail_size != new_size:
+            self.thumbnail_size = new_size
+            self.thumbnail_cache.clear() # Clear cache to force re-render
+            # Notify view to redraw decorations (thumbnails)
+            self.dataChanged.emit(self.index(0, 0), self.index(self.rowCount() - 1, self.columnCount() - 1), [Qt.ItemDataRole.DecorationRole])
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
@@ -125,6 +125,10 @@ class ImageTableModel(QAbstractTableModel):
                 return item_data.get('file_path', '')
 
         elif role == Qt.ItemDataRole.DecorationRole and col == 0:
+            # サムネイルサイズが0の場合は何も返さない
+            if self.thumbnail_size.width() == 0:
+                return None
+                
             file_path = item_data.get('file_path')
             if file_path in self.thumbnail_cache:
                 return self.thumbnail_cache[file_path]
@@ -290,22 +294,33 @@ class ImageFeatureViewerApp(QMainWindow):
         # Add thumbnail size controls to the far right of search_layout
         search_layout.addStretch(1) # Pushes subsequent widgets to the right
         search_layout.addWidget(QLabel("サムネイルサイズ:"))
-        self.thumbnail_size_slider = QSlider(Qt.Horizontal)
-        self.thumbnail_size_slider.setRange(50, 400) # Min 50, Max 400 pixels
-        self.thumbnail_size_slider.setSingleStep(50) # Step 50
-        self.thumbnail_size_slider.setTickPosition(QSlider.TicksBelow) # Show ticks
-        self.thumbnail_size_slider.setTickInterval(50) # Ticks at 50, 100, etc.
-        self.thumbnail_size_slider.setValue(self.thumbnail_size)
-        self.thumbnail_size_slider.setFixedWidth(120) # Make slider smaller
-        self.thumbnail_size_slider.valueChanged.connect(self._on_thumbnail_size_changed)
         
-        self.thumbnail_size_input = QLineEdit(str(self.thumbnail_size))
-        self.thumbnail_size_input.setFixedWidth(40) # Make input smaller
-        self.thumbnail_size_input.setValidator(QIntValidator(50, 400)) # Ensure valid input range
-        self.thumbnail_size_input.editingFinished.connect(self._on_thumbnail_size_changed)
-
-        search_layout.addWidget(self.thumbnail_size_slider)
-        search_layout.addWidget(self.thumbnail_size_input)
+        # Replace slider and text input with a dropdown
+        from PySide6.QtWidgets import QComboBox
+        self.thumbnail_size_combo = QComboBox()
+        self.thumbnail_size_combo.addItem("非表示", 0)
+        self.thumbnail_size_combo.addItem("50px", 50)
+        self.thumbnail_size_combo.addItem("100px", 100)
+        self.thumbnail_size_combo.addItem("200px", 200)
+        self.thumbnail_size_combo.addItem("300px", 300)
+        self.thumbnail_size_combo.addItem("400px", 400)
+        
+        # Set default selection based on current thumbnail_size
+        if self.thumbnail_size == 0:
+            self.thumbnail_size_combo.setCurrentIndex(0)
+        elif self.thumbnail_size <= 50:
+            self.thumbnail_size_combo.setCurrentIndex(1)
+        elif self.thumbnail_size <= 100:
+            self.thumbnail_size_combo.setCurrentIndex(2)
+        elif self.thumbnail_size <= 200:
+            self.thumbnail_size_combo.setCurrentIndex(3)
+        elif self.thumbnail_size <= 300:
+            self.thumbnail_size_combo.setCurrentIndex(4)
+        else:
+            self.thumbnail_size_combo.setCurrentIndex(5)
+        
+        self.thumbnail_size_combo.currentIndexChanged.connect(self._on_thumbnail_size_changed)
+        search_layout.addWidget(self.thumbnail_size_combo)
         
         main_layout.addLayout(search_layout)
 
@@ -486,39 +501,28 @@ class ImageFeatureViewerApp(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "初期化エラー", f"アプリケーションの初期化中にエラーが発生しました:\n{e}")
 
-    def _on_thumbnail_size_changed(self, value=None):
-        """サムネイルサイズのスライダーまたは入力フィールドが変更されたときのハンドラ"""
-        new_size = self.thumbnail_size
-
-        if isinstance(value, int): # Value from QSlider
-            new_size = value
-        else: # Value from QLineEdit (editingFinished)
-            try:
-                line_edit_value = int(self.thumbnail_size_input.text())
-                # Use updated range for validation
-                if 50 <= line_edit_value <= 400: 
-                    new_size = line_edit_value
-                else:
-                    QMessageBox.warning(self, "入力エラー", "サムネイルサイズは50から400の範囲で入力してください。")
-                    self.thumbnail_size_input.setText(str(self.thumbnail_size)) # Revert to current value
-                    return
-            except ValueError:
-                QMessageBox.warning(self, "入力エラー", "有効な数値を入力してください。")
-                self.thumbnail_size_input.setText(str(self.thumbnail_size)) # Revert to current value
-                return
+    def _on_thumbnail_size_changed(self, index=None):
+        """サムネイルサイズのコンボボックスが変更されたときのハンドラ"""
+        new_size = self.thumbnail_size_combo.currentData()
         
-        # Ensure consistency across UI elements
-        if self.thumbnail_size != new_size:
+        if new_size != self.thumbnail_size:
             self.thumbnail_size = new_size
-            self.thumbnail_size_slider.setValue(self.thumbnail_size)
-            self.thumbnail_size_input.setText(str(self.thumbnail_size))
-            self.status_bar.showMessage(f"サムネイルサイズを {self.thumbnail_size}px に設定しました。")
+            
+            if self.thumbnail_size == 0:
+                # 非表示の場合
+                self.status_bar.showMessage("サムネイルを非表示に設定しました。")
+                self.table_view.setColumnWidth(0, 0)  # サムネイル列を非表示
+                self.table_view.setColumnHidden(0, True)  # 列を完全に隠す
+                self.table_view.verticalHeader().setDefaultSectionSize(25)  # 行の高さを最小に
+            else:
+                # サイズ指定の場合
+                self.status_bar.showMessage(f"サムネイルサイズを {self.thumbnail_size}px に設定しました。")
+                self.table_view.setColumnHidden(0, False)  # 列を表示
+                self.table_view.setColumnWidth(0, self.thumbnail_size)
+                self.table_view.verticalHeader().setDefaultSectionSize(self.thumbnail_size + 5)
 
-            # Update model and view
+            # モデルにサイズ変更を通知
             self.model.set_current_thumbnail_size(self.thumbnail_size)
-            self.table_view.setColumnWidth(0, self.thumbnail_size)
-            self.table_view.verticalHeader().setDefaultSectionSize(self.thumbnail_size + 5)
-
 
     def _set_display_count(self):
         new_count, ok = QInputDialog.getInt(self, "表示件数を設定", "表示する画像の最大数:",

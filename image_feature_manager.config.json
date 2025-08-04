@@ -1,13 +1,13 @@
 {
     "top_n_display_count": 1000,
-    "similarity_threshold": 0.25,
+    "similarity_threshold": 0.1,
     "recent_db_paths": [
-        "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/test726.txt.db",
         "G:/マイドライブ/linux/image_processing/test.db",
+        "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/test726.txt.db",
         "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/37pixiv.txt.db"
     ],
-    "last_opened_db_path": "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/test726.txt.db",
-    "window_x": 42,
-    "window_y": 1134,
-    "thumbnail_size": 300
+    "last_opened_db_path": "G:/マイドライブ/linux/image_processing/test.db",
+    "window_x": 216,
+    "window_y": 1165,
+    "thumbnail_size": 0
 }
