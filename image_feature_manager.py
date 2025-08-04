@@ -3,19 +3,18 @@ import os
 import json
 import sqlite3
 import numpy as np
-import time
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QTableView, QLineEdit, QHeaderView,
     QStatusBar, QAbstractItemView, QMessageBox, QInputDialog, QMenu,
-    QSlider, QLabel, QComboBox
+    QLabel, QComboBox, QProgressDialog
 )
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, Qt, QSize,
     QThreadPool, QRunnable, Signal, QObject, QUrl
 )
-from PySide6.QtGui import QPixmap, QImage, QDesktopServices, QIntValidator # QIntValidatorを追加
+from PySide6.QtGui import QPixmap, QDesktopServices
 
 # --- 新しいモジュールのインポート ---
 from db_manager import DBManager, blob_to_numpy, numpy_to_blob
@@ -63,6 +62,98 @@ class ThumbnailGenerator(QRunnable):
             error_msg = f"ERROR: サムネイル生成中に予期せぬエラーが発生しました ({self.image_path}): {e}"
             print(error_msg, file=sys.stderr)
             self.signal_emitter.error.emit(f"サムネイル生成エラー ({os.path.basename(self.image_path)}): {e}")
+
+# --- 特徴量取得をバックグラウンドで行うためのQRunnableとシグナルエミッター ---
+class FeatureExtractionSignalEmitter(QObject):
+    """特徴量取得タスクからメインスレッドにシグナルを送るためのヘルパークラス"""
+    progress_update = Signal(int, int, str)  # (current, total, filename)
+    finished = Signal(int)  # 処理されたファイル数
+    error = Signal(str)
+
+class FeatureExtractor(QRunnable):
+    """画像ファイルの特徴量を抽出するタスク"""
+    def __init__(self, db_path: str, files_without_features: list, signal_emitter: FeatureExtractionSignalEmitter):
+        super().__init__()
+        self.db_path = db_path
+        self.files_without_features = files_without_features
+        self.signal_emitter = signal_emitter
+        self.db_manager = None
+        self.clip_feature_extractor = None
+
+    def run(self):
+        try:
+            self.db_manager = DBManager(self.db_path)
+            self.clip_feature_extractor = CLIPFeatureExtractor()
+            
+            total_files = len(self.files_without_features)
+            
+            if total_files == 0:
+                self.signal_emitter.finished.emit(0)
+                return
+
+            # 特徴量抽出の進捗を手動で追跡
+            self.signal_emitter.progress_update.emit(0, total_files, "CLIP特徴量の抽出中...")
+            
+            # 1つずつ処理して進捗を更新
+            extracted_features = []
+            processed_indices = []
+            
+            for i, file_path in enumerate(self.files_without_features):
+                try:
+                    # 個別に特徴量を抽出
+                    features, indices = self.clip_feature_extractor.extract_features_from_paths([file_path])
+                    if len(features) > 0:
+                        extracted_features.append(features[0])
+                        processed_indices.append(i)
+                    
+                    # 進捗を更新
+                    self.signal_emitter.progress_update.emit(
+                        i + 1, 
+                        total_files, 
+                        f"特徴量抽出中: {os.path.basename(file_path)}"
+                    )
+                except Exception as e:
+                    error_msg = f"特徴量抽出エラー ({os.path.basename(file_path)}): {e}"
+                    print(error_msg, file=sys.stderr)
+                    self.signal_emitter.error.emit(error_msg)
+                    continue
+            
+            if len(extracted_features) == 0:
+                self.signal_emitter.finished.emit(0)
+                return
+
+            # データベース更新フェーズ
+            self.signal_emitter.progress_update.emit(0, len(extracted_features), "データベースを更新中...")
+            
+            updated_count = 0
+            for i, (feature, original_index) in enumerate(zip(extracted_features, processed_indices)):
+                file_path = self.files_without_features[original_index]
+                feature_blob = numpy_to_blob(feature)
+                
+                try:
+                    self.db_manager.update_file_metadata(file_path, {'clip_feature_blob': feature_blob})
+                    updated_count += 1
+                    
+                    # DB更新の進捗を更新
+                    self.signal_emitter.progress_update.emit(
+                        i + 1, 
+                        len(extracted_features), 
+                        f"DB更新中: {os.path.basename(file_path)}"
+                    )
+                except Exception as e:
+                    error_msg = f"特徴量更新エラー ({os.path.basename(file_path)}): {e}"
+                    print(error_msg, file=sys.stderr)
+                    self.signal_emitter.error.emit(error_msg)
+            
+            self.signal_emitter.finished.emit(updated_count)
+            
+        except Exception as e:
+            error_msg = f"特徴量抽出処理中にエラーが発生しました: {e}"
+            print(error_msg, file=sys.stderr)
+            self.signal_emitter.error.emit(error_msg)
+        finally:
+            if self.db_manager:
+                self.db_manager.close()
 
 # --- 2. データベースのデータと連携するカスタムテーブルモデル ---
 class ImageTableModel(QAbstractTableModel):
@@ -293,7 +384,6 @@ class ImageFeatureViewerApp(QMainWindow):
         search_layout.addWidget(QLabel("サムネイルサイズ:"))
         
         # Replace slider and text input with a dropdown
-        from PySide6.QtWidgets import QComboBox
         self.thumbnail_size_combo = QComboBox()
         self.thumbnail_size_combo.addItem("非表示", 0)
         self.thumbnail_size_combo.addItem("50px", 50)
@@ -595,6 +685,85 @@ class ImageFeatureViewerApp(QMainWindow):
             QMessageBox.critical(self, "検索エラー", f"検索中に予期せぬエラーが発生しました:\n{e}")
 
     def _acquire_missing_features(self):
+        if not self.db_manager or not self.clip_feature_extractor:
+            self.status_bar.showMessage("エラー: DBが選択されていないか、CLIPモデルが初期化されていません。")
+            return
+        
+        try:
+            # メインスレッドからDBManagerを使ってファイルパスを取得
+            files_without_features = self.db_manager.get_file_paths_without_clip_features()
+            
+            if not files_without_features:
+                self.status_bar.showMessage("特徴量がないファイルは見つかりませんでした。")
+                QMessageBox.information(self, "情報", "特徴量がないファイルは見つかりませんでした。")
+                return
+
+            # 進捗ダイアログを作成
+            self.progress_dialog = QProgressDialog("特徴量を抽出中...", "キャンセル", 0, len(files_without_features), self)
+            self.progress_dialog.setWindowTitle("特徴量取得")
+            self.progress_dialog.setModal(True)
+            self.progress_dialog.setMinimumDuration(0)  # すぐに表示
+            self.progress_dialog.show()
+
+            # シグナルエミッターを作成
+            self.feature_extraction_emitter = FeatureExtractionSignalEmitter()
+            self.feature_extraction_emitter.progress_update.connect(self._on_feature_extraction_progress)
+            self.feature_extraction_emitter.finished.connect(self._on_feature_extraction_finished)
+            self.feature_extraction_emitter.error.connect(self._on_feature_extraction_error)
+
+            # 特徴量抽出タスクを開始
+            feature_extractor = FeatureExtractor(
+                self.db_path, 
+                files_without_features, 
+                self.feature_extraction_emitter
+            )
+            self.thread_pool.start(feature_extractor)
+            
+            self.status_bar.showMessage(f"{len(files_without_features)} 個のファイルの特徴量抽出を開始しました...")
+            
+        except Exception as e:
+            self.status_bar.showMessage(f"特徴量取得の初期化中にエラーが発生しました: {e}")
+            QMessageBox.critical(self, "特徴量取得エラー", f"特徴量取得の初期化中に予期せぬエラーが発生しました:\n{e}")
+
+    def _on_feature_extraction_progress(self, current: int, total: int, message: str):
+        """特徴量抽出の進捗更新"""
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.setValue(current)
+            self.progress_dialog.setMaximum(total)  # 総数が変わる可能性があるため更新
+            self.progress_dialog.setLabelText(message)
+            
+            # 進捗をパーセンテージでステータスバーにも表示
+            if total > 0:
+                percentage = (current / total) * 100
+                self.status_bar.showMessage(f"{message} ({current}/{total}, {percentage:.1f}%)")
+            
+            # キャンセルボタンが押された場合の処理（実装は複雑になるため、今回は省略）
+            if self.progress_dialog.wasCanceled():
+                self.status_bar.showMessage("特徴量取得がキャンセルされました。")
+                # 注意: 実際のキャンセル処理は複雑になるため、ここでは表示のみ
+
+    def _on_feature_extraction_finished(self, updated_count: int):
+        """特徴量抽出完了"""
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.close()
+            delattr(self, 'progress_dialog')
+        
+        self.status_bar.showMessage(f"{updated_count} 個のファイルにCLIP特徴量を追加しました。")
+        QMessageBox.information(self, "完了", f"{updated_count} 個のファイルにCLIP特徴量を追加しました。")
+        
+        # DBに画像が追加され、特徴量も追加された可能性があるため、テーブルを再表示
+        self._display_all_images_from_db()
+
+    def _on_feature_extraction_error(self, error_message: str):
+        """特徴量抽出エラー"""
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.close()
+            delattr(self, 'progress_dialog')
+        
+        self.status_bar.showMessage(f"特徴量取得中にエラーが発生しました: {error_message}")
+        QMessageBox.critical(self, "特徴量取得エラー", f"特徴量取得中にエラーが発生しました:\n{error_message}")
+
+    def _acquire_missing_features2(self):
         if not self.db_manager or not self.clip_feature_extractor:
             self.status_bar.showMessage("エラー: DBが選択されていないか、CLIPモデルが初期化されていません。")
             return

@@ -3,6 +3,7 @@
 import numpy as np
 import sys
 from PIL import Image
+from external_keywords import EXTERNAL_KEYWORDS  # 外部キーワード定義をインポート
 #import os
 
 # --- 1. グローバル設定とキーワード定義 ---
@@ -11,62 +12,26 @@ from PIL import Image
 # キー: 最終的なフォルダ名 (カテゴリ名)
 # 値: そのカテゴリを表すキーワードのリスト。最初のキーワードが代表として使われる。
 # キーワードの定義
-KEYWORDS_FOR_CLASSIFICATION2 = {
-            #"Landscape": ["an outdoor landscape", "a natural scene", "a mountain view"],
-            #"Person": ["a picture of a person", "a portrait", "a group of people"],
-            #"Building": ["a building", "a city view", "architecture"],
-            #"Animal": ["an animal", "a pet", "wildlife"],
-            #"Art_Illustration": ["a digital art illustration", "a cartoon character", "an abstract image"],
-            #"Text_Document": ["a text document", "a screenshot"],
-            #"Object_Misc": ["a scene with many objects", "a food item", "a vehicle", "a hand"],
-            #"Anime": ["an anime character", "a game screenshot", "a CD album cover"],
-            #"Other_Visual": ["a blurred background", "a black and white photo", "a vibrant colorful image"],
-            # 37
-            "a4": ["foot", "barefoot", "calf", "barefoot soles", "leg", "sole", "toes", "toenails", "heel", "a foot and a penis", "penis massage by feet" "shoes", "sandals", "socks"],
-            "10005": ["a vagina", "between legs",],
-            "face": ["a fimale face", "a female portrait"],
-            "mouth": ["mouth", "teeth", "lips", "tongue"],
-            "bj": ["a mouth and penis", "a face and penis", "blow job", "oral sex"],
-            "fin": ["ejaculation", "semen", "sperm"],
-            "sv": ["penis massage by hand, a hand and a penis", "submissive", "obedience", "slavish"],
-            "soft":["underware", "swimsuit", "bra"],
-            "1011": ["little girl"],
-            "1010": ["toilet", "japanese-style toilet", "using japanese-style toilet", "peeing", "excretion", "feces"],
-            "fk": ["people having sex", "a girl getting fucked"],
-            "multi" :["multiple girls"],
-            "body" :["female body","a breast", "a nipple", "a butt"],
-            "chu": ["kissing"]
-}
 KEYWORDS_FOR_CLASSIFICATION = {
     # 自然・風景
     "Landscape": ["an outdoor landscape", "a natural scene", "a mountain view", "a forest", "a beach", "a sunset", "a river", "a field", "a sky"],
     "Nature_Elements": ["a flower", "a tree", "a plant", "clouds", "water", "a rock", "snow", "ice"],
-
     # 人物関連
     "Person_Portrait": ["a close up of a person", "a portrait", "a human face", "headshot of a person", "selfie"],
     "Person_FullBody": ["a person standing", "a person walking", "a person sitting", "a person from behind", "multiple people", "a crowd"],
     "Person_Action": ["a person running", "a person jumping", "a person dancing", "a person playing sports", "people interacting"],
-    
     # 都市・建築
     "Building": ["a building", "a city view", "an urban landscape", "architecture", "a house", "a skyscraper", "a bridge", "a street", "an interior of a building"],
     "Vehicle": ["a car", "a truck", "a motorcycle", "an airplane", "a train", "a boat", "a bicycle"], # 乗り物を独立カテゴリに
-
     # 動物
     "Animal": ["an animal", "a pet", "wildlife", "a dog", "a cat", "a bird", "a fish", "an insect"],
-
     # アート・デザイン
     "Art_Illustration": ["a digital art illustration", "a cartoon character", "an abstract image", "a painting", "a drawing", "a sculpture", "a graphic design", "a sketch"],
     "Text_Document": ["a text document", "a screenshot", "a document with text", "a book page", "a sign with text", "a newspaper"],
-
     # 物体・その他
     "Food_Drink": ["a food item", "a dish", "fruit", "vegetables", "a drink", "a meal", "dessert"], # 食べ物を独立カテゴリに
     "Object_Household": ["furniture", "a chair", "a table", "a bed", "kitchenware", "home decor"], # 家庭用品を追加
     "Object_Misc": ["a scene with many objects", "a tool", "electronics", "a bag", "clothes", "a shoe", "a socks", "a hand", "money"],
-    
-    # NSFW 
-    "Adult_Nudity": ["a nude body", "exposed breasts", "genitals", "a naked person", "pornographic image", "explicit content", "sexual act"],
-    "Adult_Implied": ["implied nudity", "suggestive pose", "lingerie", "revealing clothing", "buttocks", "cleavage"],
-    
     # その他視覚的特徴
     "Abstract_Pattern": ["an abstract pattern", "a texture", "a blurry image", "a background", "a design"], # 抽象的なものやパターン
     "Black_White": ["a black and white photo", "monochrome image"],
@@ -75,7 +40,7 @@ KEYWORDS_FOR_CLASSIFICATION = {
     "Watermark_Overlay": ["an image with a watermark", "text overlay on image"], # ウォーターマークなども識別
     "Other_Visual": ["a strange image", "a distorted image", "a placeholder image", "an empty image"] # どうしても分類できないもの
 }
-KEYWORDS_FOR_CLASSIFICATION.update(KEYWORDS_FOR_CLASSIFICATION2)
+KEYWORDS_FOR_CLASSIFICATION.update(EXTERNAL_KEYWORDS)
 
 KEYWORDS_FOR_KMEANS_NAMING = [item for sublist in KEYWORDS_FOR_CLASSIFICATION.values() for item in sublist]
 
