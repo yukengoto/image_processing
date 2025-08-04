@@ -275,14 +275,11 @@ class ImageFeatureViewerApp(QMainWindow):
         search_layout = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("検索キーワードを入力...")
+        self.search_input.returnPressed.connect(self._perform_search)  # Enterキーで検索実行
         self.search_button = QPushButton("検索")
         self.search_button.clicked.connect(self._perform_search)
-        
-        # Removed self.open_db_button from here as it's in the menu
-        # self.open_db_button = QPushButton("DBを開く")
-        # self.open_db_button.clicked.connect(self._open_db_file_dialog)
 
-        self.acquire_features_button = QPushButton("特徴量がないファイルを取得")
+        self.acquire_features_button = QPushButton("特徴量を取得")
         self.acquire_features_button.clicked.connect(self._acquire_missing_features)
         self.acquire_features_button.setEnabled(False)
 
