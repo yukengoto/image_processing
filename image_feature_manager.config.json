@@ -2,12 +2,14 @@
     "top_n_display_count": 1000,
     "similarity_threshold": 0.1,
     "recent_db_paths": [
+        "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/yusei_video.txt.db",
+        "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/37pixiv.txt.db",
+        "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/HISTORY.txt.db",
         "G:/マイドライブ/linux/image_processing/test.db",
-        "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/test726.txt.db",
-        "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/37pixiv.txt.db"
+        "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/test726.txt.db"
     ],
-    "last_opened_db_path": "G:/マイドライブ/linux/image_processing/test.db",
-    "window_x": 191,
-    "window_y": 1177,
-    "thumbnail_size": 300
+    "last_opened_db_path": "C:/Users/yuken/OneDrive/ドキュメント/FileDirector/yusei_video.txt.db",
+    "window_x": 150,
+    "window_y": 1129,
+    "thumbnail_size": 50
 }
