@@ -63,6 +63,87 @@ class ThumbnailGenerator(QRunnable):
             print(error_msg, file=sys.stderr)
             self.signal_emitter.error.emit(f"サムネイル生成エラー ({os.path.basename(self.image_path)}): {e}")
 
+# --- 全画像データロード用のQRunnableとシグナルエミッター ---
+class AllImagesLoadSignalEmitter(QObject):
+    """全画像データのロードタスクからメインスレッドにシグナルを送るためのヘルパークラス"""
+    progress_update = Signal(int, int, str)  # (current, total, message)
+    finished = Signal(list, int)  # (data_list, total_count)
+    error = Signal(str)
+
+class AllImagesLoader(QRunnable):
+    """データベースから全画像データとタグ情報を取得するタスク"""
+    def __init__(self, db_path: str, signal_emitter: AllImagesLoadSignalEmitter, max_display_count: int = None):
+        super().__init__()
+        self.db_path = db_path
+        self.signal_emitter = signal_emitter
+        self.max_display_count = max_display_count
+        self.db_manager = None
+
+    def run(self):
+        try:
+            self.db_manager = DBManager(self.db_path)
+            
+            # 全画像のメタデータを取得
+            self.signal_emitter.progress_update.emit(0, 0, "画像データを読み込み中...")
+            all_db_data = self.db_manager.get_all_file_metadata()
+            total_count = len(all_db_data)
+            
+            if total_count == 0:
+                self.signal_emitter.finished.emit([], 0)
+                return
+            
+            # 各ファイルのタグ情報を取得（バッチ処理で効率化）
+            self.signal_emitter.progress_update.emit(0, total_count, "タグ情報を読み込み中...")
+            
+            # タグ情報を一括取得するためのSQL
+            cursor = self.db_manager.conn.cursor()
+            file_paths = [item['file_path'] for item in all_db_data]
+            
+            # IN句を使って一括でタグを取得
+            placeholders = ','.join('?' * len(file_paths))
+            cursor.execute(f"""
+                SELECT file_path, tag FROM file_tags 
+                WHERE file_path IN ({placeholders})
+                ORDER BY file_path, tag
+            """, file_paths)
+            
+            # タグ情報を辞書にまとめる
+            tags_dict = {}
+            for row in cursor.fetchall():
+                file_path = row[0]
+                tag = row[1]
+                if file_path not in tags_dict:
+                    tags_dict[file_path] = set()
+                tags_dict[file_path].add(tag)
+            
+            # 各アイテムにタグ情報とスコア（None）を追加
+            for i, item in enumerate(all_db_data):
+                item['score'] = None  # 検索ではないのでスコアはNone
+                file_path = item.get('file_path')
+                item['tags'] = tags_dict.get(file_path, set())
+                
+                # 進捗更新（100件ごと）
+                if (i + 1) % 100 == 0 or (i + 1) == total_count:
+                    self.signal_emitter.progress_update.emit(
+                        i + 1, total_count, f"データ整理中: {i + 1}/{total_count}"
+                    )
+            
+            # 表示件数制限があれば適用
+            if self.max_display_count and self.max_display_count < len(all_db_data):
+                display_data = all_db_data[:self.max_display_count]
+            else:
+                display_data = all_db_data
+            
+            self.signal_emitter.finished.emit(display_data, total_count)
+            
+        except Exception as e:
+            error_msg = f"全画像データの読み込み中にエラーが発生しました: {e}"
+            print(error_msg, file=sys.stderr)
+            self.signal_emitter.error.emit(error_msg)
+        finally:
+            if self.db_manager:
+                self.db_manager.close()
+
 # --- 特徴量取得をバックグラウンドで行うためのQRunnableとシグナルエミッター ---
 class FeatureExtractionSignalEmitter(QObject):
     """特徴量取得タスクからメインスレッドにシグナルを送るためのヘルパークラス"""
@@ -345,7 +426,7 @@ class ImageFeatureViewerApp(QMainWindow):
         self.setGeometry(100, 100, 1200, 800)
 
         self.db_path = None
-        self.db_manager = None # メインスレッドでのDBManagerインスタンス
+        self.db_manager = None # メインスレッド用のDBManagerインスタンス
         self.clip_feature_extractor = None
 
         self.top_n_display_count = 1000 
@@ -379,12 +460,18 @@ class ImageFeatureViewerApp(QMainWindow):
         self.search_button = QPushButton("検索")
         self.search_button.clicked.connect(self._perform_search)
 
+        # 全画像表示ボタンを追加
+        self.show_all_button = QPushButton("全画像表示")
+        self.show_all_button.clicked.connect(self._display_all_images_from_db)
+        self.show_all_button.setEnabled(False)
+
         self.acquire_features_button = QPushButton("特徴量を取得")
         self.acquire_features_button.clicked.connect(self._acquire_missing_features)
         self.acquire_features_button.setEnabled(False)
 
         search_layout.addWidget(self.search_input)
         search_layout.addWidget(self.search_button)
+        search_layout.addWidget(self.show_all_button)
         search_layout.addWidget(self.acquire_features_button)
         
         # Add thumbnail size controls to the far right of search_layout
@@ -530,9 +617,7 @@ class ImageFeatureViewerApp(QMainWindow):
         if path in self.recent_db_paths:
             self.recent_db_paths.remove(path)
         self.recent_db_paths.insert(0, path)
-        max_recent = 10
-        if len(self.recent_db_paths) > max_recent:
-            self.recent_db_paths = self.recent_db_paths[:max_recent]
+        self.recent_db_paths = self.recent_db_paths[:10]  # 最大10件
 
     def _create_new_db_file(self):
         options = QFileDialog.Option.DontUseNativeDialog
@@ -572,17 +657,19 @@ class ImageFeatureViewerApp(QMainWindow):
             if self.clip_feature_extractor is None:
                 self.clip_feature_extractor = CLIPFeatureExtractor()
 
-            self.status_bar.showMessage(f"データベース '{os.path.basename(self.db_path)}' を開きました。")
             self._add_recent_db_path(self.db_path)
             
             self.search_button.setEnabled(True)
+            self.show_all_button.setEnabled(True)
             self.acquire_features_button.setEnabled(True)
             self.add_tag_action.setEnabled(True)
             self.filter_by_tag_action.setEnabled(True)
 
             total_count = self.db_manager.get_total_image_count()
             self.status_bar.showMessage(f"データベース '{os.path.basename(self.db_path)}' を開きました。全画像数: {total_count}")
-            self.model.set_data([], total_count)
+            
+            # データベース開示時に自動で全画像を表示
+            self._display_all_images_from_db_async()
             
         except sqlite3.Error as e:
             QMessageBox.critical(self, "DB接続エラー", f"データベースへの接続に失敗しました:\n{e}")
@@ -590,6 +677,7 @@ class ImageFeatureViewerApp(QMainWindow):
             self.db_manager = None
             self.status_bar.showMessage("DB未接続。")
             self.search_button.setEnabled(False)
+            self.show_all_button.setEnabled(False)
             self.acquire_features_button.setEnabled(False)
             self.add_tag_action.setEnabled(False)
             self.filter_by_tag_action.setEnabled(False)
@@ -658,7 +746,7 @@ class ImageFeatureViewerApp(QMainWindow):
                 return
 
             results = []
-            all_db_data = self.db_manager.get_all_file_metadata() # メインスレッドからアクセス
+            all_db_data = self.db_manager.get_all_file_metadata()
 
             for item in all_db_data:
                 file_path = item.get('file_path')
@@ -680,9 +768,7 @@ class ImageFeatureViewerApp(QMainWindow):
             total_image_count = len(all_db_data)
             
             filtered_results = [r for r in results if r['score'] >= self.similarity_threshold]
-
             sorted_results = sorted(filtered_results, key=lambda x: x['score'], reverse=True)
-
             display_data = sorted_results[:self.top_n_display_count]
             
             self.model.set_data(display_data, total_image_count)
@@ -701,7 +787,6 @@ class ImageFeatureViewerApp(QMainWindow):
             return
         
         try:
-            # メインスレッドからDBManagerを使ってファイルパスを取得
             files_without_features = self.db_manager.get_files_without_clip_features()
             
             if not files_without_features:
@@ -713,7 +798,7 @@ class ImageFeatureViewerApp(QMainWindow):
             self.progress_dialog = QProgressDialog("特徴量を抽出中...", "キャンセル", 0, len(files_without_features), self)
             self.progress_dialog.setWindowTitle("特徴量取得")
             self.progress_dialog.setModal(True)
-            self.progress_dialog.setMinimumDuration(0)  # すぐに表示
+            self.progress_dialog.setMinimumDuration(0)
             self.progress_dialog.show()
 
             # シグナルエミッターを作成
@@ -740,18 +825,12 @@ class ImageFeatureViewerApp(QMainWindow):
         """特徴量抽出の進捗更新"""
         if hasattr(self, 'progress_dialog'):
             self.progress_dialog.setValue(current)
-            self.progress_dialog.setMaximum(total)  # 総数が変わる可能性があるため更新
+            self.progress_dialog.setMaximum(total)
             self.progress_dialog.setLabelText(message)
             
-            # 進捗をパーセンテージでステータスバーにも表示
             if total > 0:
                 percentage = (current / total) * 100
                 self.status_bar.showMessage(f"{message} ({current}/{total}, {percentage:.1f}%)")
-            
-            # キャンセルボタンが押された場合の処理（実装は複雑になるため、今回は省略）
-            if self.progress_dialog.wasCanceled():
-                self.status_bar.showMessage("特徴量取得がキャンセルされました。")
-                # 注意: 実際のキャンセル処理は複雑になるため、ここでは表示のみ
 
     def _on_feature_extraction_finished(self, updated_count: int):
         """特徴量抽出完了"""
@@ -762,8 +841,8 @@ class ImageFeatureViewerApp(QMainWindow):
         self.status_bar.showMessage(f"{updated_count} 個のファイルにCLIP特徴量を追加しました。")
         QMessageBox.information(self, "完了", f"{updated_count} 個のファイルにCLIP特徴量を追加しました。")
         
-        # DBに画像が追加され、特徴量も追加された可能性があるため、テーブルを再表示
-        self._display_all_images_from_db()
+        # 表示を更新
+        self._display_all_images_from_db_async()
 
     def _on_feature_extraction_error(self, error_message: str):
         """特徴量抽出エラー"""
@@ -799,7 +878,6 @@ class ImageFeatureViewerApp(QMainWindow):
                     file_path = row_data['file_path']
                     
                     try:
-                        # C++互換のDBManagerメソッドを使用してタグを追加
                         for tag in new_tags:
                             self.db_manager.add_tag_to_file(file_path, tag)
                         updated_count += 1
@@ -809,11 +887,8 @@ class ImageFeatureViewerApp(QMainWindow):
 
             if updated_count > 0:
                 QMessageBox.information(self, "完了", f"{updated_count} 個のファイルにタグを追加しました。")
-                # 検索結果を再実行してタグ表示を更新
-                if self.search_input.text().strip():
-                    self._perform_search()
-                else:
-                    self._display_all_images_from_db()
+                # 表示を再読み込み
+                self._display_all_images_from_db_async()
             else:
                 QMessageBox.warning(self, "警告", "タグの追加に失敗したファイルがあります。")
 
@@ -833,7 +908,6 @@ class ImageFeatureViewerApp(QMainWindow):
                 return
             
             try:
-                # タグによる検索を実行
                 file_paths = self.db_manager.search_files_by_tags(tags, match_all=True)
                 
                 if not file_paths:
@@ -845,10 +919,9 @@ class ImageFeatureViewerApp(QMainWindow):
                 for file_path in file_paths:
                     file_info = self.db_manager.load_file_info(file_path)
                     if file_info:
-                        file_info['score'] = None  # タグ検索にはスコアは不要
+                        file_info['score'] = None
                         results.append(file_info)
                 
-                # 結果を表示
                 self.model.set_data(results[:self.top_n_display_count], len(results))
                 self.status_bar.showMessage(f"タグフィルター完了。{len(results)} 件のファイルが見つかりました。")
                 
@@ -865,6 +938,74 @@ class ImageFeatureViewerApp(QMainWindow):
                 else:
                     QMessageBox.warning(self, "ファイルが見つかりません", f"ファイルが見つかりません:\n{file_path}")
 
+    def _display_all_images_from_db_async(self):
+        """バックグラウンドで全画像データを非同期ロード"""
+        if not self.db_manager:
+            return
+        
+        # 進捗ダイアログを作成
+        self.all_images_progress_dialog = QProgressDialog("画像データを読み込み中...", "キャンセル", 0, 0, self)
+        self.all_images_progress_dialog.setWindowTitle("データ読み込み")
+        self.all_images_progress_dialog.setModal(True)
+        self.all_images_progress_dialog.setMinimumDuration(500)  # 500ms後に表示
+        
+        # シグナルエミッターを作成
+        self.all_images_load_emitter = AllImagesLoadSignalEmitter()
+        self.all_images_load_emitter.progress_update.connect(self._on_all_images_load_progress)
+        self.all_images_load_emitter.finished.connect(self._on_all_images_load_finished)
+        self.all_images_load_emitter.error.connect(self._on_all_images_load_error)
+        
+        # 全画像ローダータスクを開始
+        all_images_loader = AllImagesLoader(
+            self.db_path,
+            self.all_images_load_emitter,
+            self.top_n_display_count
+        )
+        self.thread_pool.start(all_images_loader)
+        
+        self.status_bar.showMessage("画像データを読み込み中...")
+
+    def _display_all_images_from_db(self):
+        """同期版：全画像表示（ボタンから呼び出される）"""
+        self._display_all_images_from_db_async()
+
+    def _on_all_images_load_progress(self, current: int, total: int, message: str):
+        """全画像ロードの進捗更新"""
+        if hasattr(self, 'all_images_progress_dialog'):
+            if total > 0:
+                self.all_images_progress_dialog.setMaximum(total)
+                self.all_images_progress_dialog.setValue(current)
+                percentage = (current / total) * 100
+                self.status_bar.showMessage(f"{message} ({current}/{total}, {percentage:.1f}%)")
+            else:
+                self.all_images_progress_dialog.setRange(0, 0)  # 不定長進捗バー
+                self.status_bar.showMessage(message)
+            
+            self.all_images_progress_dialog.setLabelText(message)
+
+    def _on_all_images_load_finished(self, data_list: list, total_count: int):
+        """全画像ロード完了"""
+        if hasattr(self, 'all_images_progress_dialog'):
+            self.all_images_progress_dialog.close()
+            delattr(self, 'all_images_progress_dialog')
+        
+        self.model.set_data(data_list, total_count)
+        
+        displayed_count = len(data_list)
+        if displayed_count < total_count:
+            self.status_bar.showMessage(f"全画像を表示しました。{displayed_count}/{total_count} 件表示（表示件数制限: {self.top_n_display_count}）")
+        else:
+            self.status_bar.showMessage(f"全画像を表示しました。合計 {total_count} 件")
+
+    def _on_all_images_load_error(self, error_message: str):
+        """全画像ロードエラー"""
+        if hasattr(self, 'all_images_progress_dialog'):
+            self.all_images_progress_dialog.close()
+            delattr(self, 'all_images_progress_dialog')
+        
+        self.status_bar.showMessage(f"画像データの読み込み中にエラーが発生しました: {error_message}")
+        QMessageBox.critical(self, "データ読み込みエラー", f"画像データの読み込み中にエラーが発生しました:\n{error_message}")
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
@@ -878,7 +1019,7 @@ class ImageFeatureViewerApp(QMainWindow):
             event.ignore()
 
     def dropEvent(self, event):
-        if not self.db_manager: # メインスレッドのDBManagerが存在するか確認
+        if not self.db_manager:
             QMessageBox.warning(self, "エラー", "DBが開かれていません。先にDBを開くか作成してください。")
             event.ignore()
             return
@@ -925,27 +1066,24 @@ class ImageFeatureViewerApp(QMainWindow):
                         for file_name in files:
                             if file_name.lower().endswith(self.SUPPORTED_IMAGE_EXTENSIONS):
                                 full_path = os.path.join(root, file_name)
-                                # 既にDBにあるファイルはスキップ (メインスレッドのDBManagerを使用)
                                 if not self.db_manager.load_file_info(full_path): 
                                     image_paths_to_add.append(full_path)
                         if not recursive:
                             break
 
             if image_paths_to_add:
-                # 重複を排除し、ユニークなパスのみにする
                 image_paths_to_add = list(set(image_paths_to_add))
                 if not image_paths_to_add:
                     self.status_bar.showMessage("追加する新しい画像ファイルは見つかりませんでした。")
                     event.acceptProposedAction()
                     return
 
-                # ImageAdderを起動 (db_pathを渡す)
                 adder_emitter = ImageAddSignalEmitter()
                 adder_emitter.progress_update.connect(self.status_bar.showMessage)
                 adder_emitter.finished.connect(self._on_image_add_finished)
                 adder_emitter.error.connect(lambda msg: QMessageBox.warning(self, "ファイル追加エラー", msg))
 
-                adder = ImageAdder(self.db_path, image_paths_to_add, adder_emitter) # db_pathを渡す
+                adder = ImageAdder(self.db_path, image_paths_to_add, adder_emitter)
                 self.thread_pool.start(adder)
                 self.status_bar.showMessage(f"{len(image_paths_to_add)} 個の画像のデータベースへの追加を開始しました...")
 
@@ -960,37 +1098,12 @@ class ImageFeatureViewerApp(QMainWindow):
         """ImageAdderからの完了シグナルを受け取った際の処理"""
         self.status_bar.showMessage(f"データベースに {added_count} 個の画像を追加しました。")
         QMessageBox.information(self, "画像追加完了", f"データベースに {added_count} 個の画像を新規追加しました。")
-        # データベースの総画像数を更新して表示 (メインスレッドのDBManagerを使用)
+        
         total_count = self.db_manager.get_total_image_count() 
         self.status_bar.showMessage(f"データベース更新完了。全画像数: {total_count}")
-        # テーブル表示を更新（必要であれば全件表示をリフレッシュ）
-        self._display_all_images_from_db()
-
-
-    def _display_all_images_from_db(self):
-        """データベース内の全画像をテーブルに表示（類似度順はなし）"""
-        if not self.db_manager:
-            return
-        try:
-            all_db_data = self.db_manager.get_all_file_metadata() # メインスレッドのDBManagerを使用
-            total_count = len(all_db_data)
-            
-            # 各ファイルのタグ情報を取得
-            for item in all_db_data:
-                item['score'] = None # スコアは検索時のみ設定される
-                file_path = item.get('file_path')
-                if file_path:
-                    tags = self.db_manager.get_file_tags(file_path)
-                    item['tags'] = set(tags) if tags else set()
-            
-            # ファイルパスでソートして表示
-            display_data = sorted(all_db_data, key=lambda x: x.get('file_path', ''))
-            
-            self.model.set_data(display_data[:self.top_n_display_count], total_count)
-            self.status_bar.showMessage(f"全画像を再表示しました。合計 {total_count} 件中、上位 {len(display_data[:self.top_n_display_count])} 件を表示中。")
-        except Exception as e:
-            self.status_bar.showMessage(f"全画像表示中にエラーが発生しました: {e}")
-            print(f"全画像表示エラー: {e}", file=sys.stderr)
+        
+        # 表示を更新
+        self._display_all_images_from_db_async()
 
     def closeEvent(self, event):
         self._save_settings()
