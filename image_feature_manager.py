@@ -498,6 +498,164 @@ class ImageAdder(QRunnable):
             if self.db_manager:
                 self.db_manager.close() # 処理終了時に接続を閉じる
 
+# image_feature_manager.py に追加するコード
+
+from PySide6.QtWidgets import (
+    # 既存のインポートに以下を追加
+    QDialog, QCheckBox, QScrollArea, QGridLayout, QGroupBox
+)
+
+# === タグ選択ダイアログクラス ===
+class TagSelectionDialog(QDialog):
+    """既存タグの選択と新規タグの入力を行うダイアログ"""
+    
+    def __init__(self, parent=None, db_manager=None, title="タグの選択", 
+                 current_tags=None, allow_new_tags=True):
+        super().__init__(parent)
+        self.db_manager = db_manager
+        self.current_tags = current_tags or set()
+        self.allow_new_tags = allow_new_tags
+        
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.resize(400, 500)
+        
+        self.selected_existing_tags = set()
+        self.new_tags_text = ""
+        
+        self._init_ui()
+        self._load_existing_tags()
+    
+    def _init_ui(self):
+        """UIの初期化"""
+        main_layout = QVBoxLayout(self)
+        
+        # 既存タグ選択エリア
+        existing_tags_group = QGroupBox("既存のタグから選択")
+        main_layout.addWidget(existing_tags_group)
+        
+        existing_layout = QVBoxLayout(existing_tags_group)
+        
+        # スクロールエリア
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        existing_layout.addWidget(self.scroll_area)
+        
+        # チェックボックスを配置するウィジェット
+        self.checkbox_widget = QWidget()
+        self.checkbox_layout = QGridLayout(self.checkbox_widget)
+        self.scroll_area.setWidget(self.checkbox_widget)
+        
+        self.tag_checkboxes = {}
+        
+        # 新規タグ入力エリア（オプション）
+        if self.allow_new_tags:
+            new_tags_group = QGroupBox("新しいタグを追加（カンマ区切り）")
+            main_layout.addWidget(new_tags_group)
+            
+            new_tags_layout = QVBoxLayout(new_tags_group)
+            self.new_tags_input = QLineEdit()
+            self.new_tags_input.setPlaceholderText("新しいタグ1, 新しいタグ2, ...")
+            new_tags_layout.addWidget(self.new_tags_input)
+        
+        # ボタン
+        button_layout = QHBoxLayout()
+        main_layout.addLayout(button_layout)
+        
+        self.select_all_button = QPushButton("すべて選択")
+        self.select_all_button.clicked.connect(self._select_all_tags)
+        button_layout.addWidget(self.select_all_button)
+        
+        self.clear_all_button = QPushButton("すべて解除")
+        self.clear_all_button.clicked.connect(self._clear_all_tags)
+        button_layout.addWidget(self.clear_all_button)
+        
+        button_layout.addStretch()
+        
+        self.ok_button = QPushButton("OK")
+        self.ok_button.clicked.connect(self.accept)
+        button_layout.addWidget(self.ok_button)
+        
+        self.cancel_button = QPushButton("キャンセル")
+        self.cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_button)
+    
+    def _load_existing_tags(self):
+        """データベースから既存のタグを読み込んでチェックボックスを作成"""
+        if not self.db_manager:
+            return
+        
+        try:
+            # データベースからすべてのタグを取得
+            cursor = self.db_manager.conn.cursor()
+            cursor.execute("SELECT DISTINCT tag FROM file_tags ORDER BY tag")
+            existing_tags = [row[0] for row in cursor.fetchall()]
+            
+            if not existing_tags:
+                no_tags_label = QLabel("既存のタグがありません")
+                no_tags_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.checkbox_layout.addWidget(no_tags_label, 0, 0, 1, 2)
+                return
+            
+            # チェックボックスを2列で配置
+            row = 0
+            col = 0
+            
+            for tag in existing_tags:
+                checkbox = QCheckBox(tag)
+                
+                # 現在のタグが選択されている場合はチェック
+                if tag in self.current_tags:
+                    checkbox.setChecked(True)
+                    self.selected_existing_tags.add(tag)
+                
+                checkbox.stateChanged.connect(
+                    lambda state, t=tag: self._on_tag_checkbox_changed(state, t)
+                )
+                
+                self.tag_checkboxes[tag] = checkbox
+                self.checkbox_layout.addWidget(checkbox, row, col)
+                
+                col += 1
+                if col >= 2:  # 2列で配置
+                    col = 0
+                    row += 1
+        
+        except Exception as e:
+            error_label = QLabel(f"タグの読み込みエラー: {e}")
+            error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.checkbox_layout.addWidget(error_label, 0, 0, 1, 2)
+    
+    def _on_tag_checkbox_changed(self, state, tag):
+        """チェックボックスの状態変更時の処理"""
+        if state == Qt.CheckState.Checked.value:
+            self.selected_existing_tags.add(tag)
+        else:
+            self.selected_existing_tags.discard(tag)
+    
+    def _select_all_tags(self):
+        """すべてのタグを選択"""
+        for checkbox in self.tag_checkboxes.values():
+            checkbox.setChecked(True)
+    
+    def _clear_all_tags(self):
+        """すべてのタグの選択を解除"""
+        for checkbox in self.tag_checkboxes.values():
+            checkbox.setChecked(False)
+    
+    def get_selected_tags(self):
+        """選択されたタグを取得"""
+        all_tags = set(self.selected_existing_tags)
+        
+        # 新規タグがあれば追加
+        if self.allow_new_tags and hasattr(self, 'new_tags_input'):
+            new_tags_text = self.new_tags_input.text().strip()
+            if new_tags_text:
+                new_tags = [tag.strip() for tag in new_tags_text.split(',') if tag.strip()]
+                all_tags.update(new_tags)
+        
+        return all_tags
+
 
 # --- 4. メインアプリケーションウィンドウ ---
 class ImageFeatureViewerApp(QMainWindow):
@@ -1004,7 +1162,121 @@ class ImageFeatureViewerApp(QMainWindow):
         self.status_bar.showMessage(f"特徴量取得中にエラーが発生しました: {error_message}")
         QMessageBox.critical(self, "特徴量取得エラー", f"特徴量取得中にエラーが発生しました:\n{error_message}")
 
+    # === ImageFeatureViewerApp クラスのメソッド修正 ===
     def _add_tags_to_selected_files(self):
+        """選択されたファイルにタグを追加（改良版）"""
+        if not self.db_manager:
+            QMessageBox.warning(self, "エラー", "DBが開かれていません。")
+            return
+        
+        selected_indexes = self.table_view.selectionModel().selectedRows()
+        if not selected_indexes:
+            QMessageBox.information(self, "情報", "タグを追加するファイルを選択してください。")
+            return
+
+        # 既存のタグ選択ダイアログを表示
+        dialog = TagSelectionDialog(
+            parent=self,
+            db_manager=self.db_manager,
+            title="タグの追加",
+            allow_new_tags=True
+        )
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected_tags = dialog.get_selected_tags()
+            
+            if not selected_tags:
+                QMessageBox.information(self, "情報", "タグが選択されていません。")
+                return
+
+            updated_count = 0
+            for index in selected_indexes:
+                row_data = self.model.get_row_data(index.row())
+                if row_data and 'file_path' in row_data:
+                    file_path = row_data['file_path']
+                    
+                    try:
+                        for tag in selected_tags:
+                            self.db_manager.add_tag_to_file(file_path, tag)
+                        updated_count += 1
+                    except Exception as e:
+                        print(f"タグ更新エラー ({file_path}): {e}")
+                        self.status_bar.showMessage(f"タグ更新エラー ({os.path.basename(file_path)}): {e}")
+
+            if updated_count > 0:
+                QMessageBox.information(self, "完了", f"{updated_count} 個のファイルに {len(selected_tags)} 個のタグを追加しました。")
+                # 表示を再読み込み
+                self._display_all_images_from_db_async()
+            else:
+                QMessageBox.warning(self, "警告", "タグの追加に失敗しました。")
+
+    def _filter_files_by_tags(self):
+        """タグによるファイルフィルタリング（改良版）"""
+        if not self.db_manager:
+            QMessageBox.warning(self, "エラー", "DBが開かれていません。")
+            return
+        
+        # タグ選択ダイアログを表示
+        dialog = TagSelectionDialog(
+            parent=self,
+            db_manager=self.db_manager,
+            title="タグでフィルタリング",
+            allow_new_tags=False  # フィルターでは新規タグは不要
+        )
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected_tags = list(dialog.get_selected_tags())
+            
+            if not selected_tags:
+                QMessageBox.information(self, "情報", "タグが選択されていません。")
+                return
+            
+            try:
+                # 「すべてのタグを含む」でフィルター
+                file_paths = self.db_manager.search_files_by_tags(selected_tags, match_all=True)
+                
+                if not file_paths:
+                    # 「いずれかのタグを含む」でも試行
+                    reply = QMessageBox.question(
+                        self, 
+                        "検索結果", 
+                        f"選択したすべてのタグを持つファイルは見つかりませんでした。\n"
+                        f"いずれかのタグを持つファイルを検索しますか？",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
+                    
+                    if reply == QMessageBox.StandardButton.Yes:
+                        file_paths = self.db_manager.search_files_by_tags(selected_tags, match_all=False)
+                    
+                    if not file_paths:
+                        QMessageBox.information(self, "検索結果", "指定されたタグを持つファイルは見つかりませんでした。")
+                        return
+                
+                # 検索結果のファイル情報を取得
+                results = []
+                for file_path in file_paths:
+                    file_info = self.db_manager.load_file_info(file_path)
+                    if file_info:
+                        file_info['score'] = None
+                        results.append(file_info)
+                
+                self.model.set_data(results[:self.top_n_display_count], len(results))
+                tag_names = ', '.join(selected_tags)
+                self.status_bar.showMessage(f"タグフィルター完了。「{tag_names}」で {len(results)} 件のファイルが見つかりました。")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "タグフィルターエラー", f"タグフィルター中にエラーが発生しました:\n{e}")
+    # === 使用方法 ===
+    # 上記のクラスとメソッドを image_feature_manager.py の該当箇所に追加・置換してください
+    # 
+    # 主な変更点：
+    # 1. TagSelectionDialog クラスを追加
+    # 2. _add_tags_to_selected_files メソッドを置換
+    # 3. _filter_files_by_tags メソッドを置換
+    # 4. インポート文に QDialog, QCheckBox, QScrollArea, QGridLayout, QGroupBox を追加
+
+
+    def _add_tags_to_selected_files2(self):
         if not self.db_manager:
             QMessageBox.warning(self, "エラー", "DBが開かれていません。")
             return
@@ -1043,7 +1315,7 @@ class ImageFeatureViewerApp(QMainWindow):
             else:
                 QMessageBox.warning(self, "警告", "タグの追加に失敗したファイルがあります。")
 
-    def _filter_files_by_tags(self):
+    def _filter_files_by_tags2(self):
         if not self.db_manager:
             QMessageBox.warning(self, "エラー", "DBが開かれていません。")
             return
