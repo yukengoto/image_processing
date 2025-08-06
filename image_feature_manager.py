@@ -79,7 +79,84 @@ class AllImagesLoader(QRunnable):
         self.max_display_count = max_display_count
         self.db_manager = None
 
+    # AllImagesLoader.run() メソッドの修正（タグ取得部分）
     def run(self):
+        try:
+            self.db_manager = DBManager(self.db_path)
+            
+            # 全画像のメタデータを取得
+            self.signal_emitter.progress_update.emit(0, 0, "画像データを読み込み中...")
+            all_db_data = self.db_manager.get_all_file_metadata()
+            total_count = len(all_db_data)
+            
+            if total_count == 0:
+                self.signal_emitter.finished.emit([], 0)
+                return
+            
+            # 各ファイルのタグ情報を取得（バッチ処理で効率化）
+            self.signal_emitter.progress_update.emit(0, total_count, "タグ情報を読み込み中...")
+            
+            # タグ情報を一括取得するためのSQL
+            cursor = self.db_manager.conn.cursor()
+            file_paths = [item['file_path'] for item in all_db_data]
+            
+            # IN句を使って一括でタグを取得
+            placeholders = ','.join('?' * len(file_paths))
+            cursor.execute(f"""
+                SELECT file_path, tag FROM file_tags 
+                WHERE file_path IN ({placeholders})
+                ORDER BY file_path, tag
+            """, file_paths)
+            
+            # タグ情報を辞書にまとめる
+            tags_dict = {}
+            for row in cursor.fetchall():
+                file_path = row[0]
+                tag = row[1]
+                if file_path not in tags_dict:
+                    tags_dict[file_path] = set()
+                tags_dict[file_path].add(tag)
+            
+            # デバッグ情報：タグ辞書の内容を確認
+            print(f"DEBUG: Found tags for {len(tags_dict)} files")
+            for file_path, tags in list(tags_dict.items())[:3]:  # 最初の3ファイル分だけ表示
+                print(f"DEBUG: {os.path.basename(file_path)}: {tags}")
+            
+            # 各アイテムにタグ情報とスコア（None）を追加
+            for i, item in enumerate(all_db_data):
+                item['score'] = None  # 検索ではないのでスコアはNone
+                file_path = item.get('file_path')
+                item['tags'] = tags_dict.get(file_path, set())
+                
+                # デバッグ：最初の数ファイルのタグ情報を出力
+                if i < 5:
+                    print(f"DEBUG: Item {i} - {os.path.basename(file_path)}: tags = {item['tags']} (type: {type(item['tags'])})")
+                
+                # 進捗更新（100件ごと）
+                if (i + 1) % 100 == 0 or (i + 1) == total_count:
+                    self.signal_emitter.progress_update.emit(
+                        i + 1, total_count, f"データ整理中: {i + 1}/{total_count}"
+                    )
+            
+            # 表示件数制限があれば適用
+            if self.max_display_count and self.max_display_count < len(all_db_data):
+                display_data = all_db_data[:self.max_display_count]
+            else:
+                display_data = all_db_data
+            
+            self.signal_emitter.finished.emit(display_data, total_count)
+            
+        except Exception as e:
+            error_msg = f"全画像データの読み込み中にエラーが発生しました: {e}"
+            print(error_msg, file=sys.stderr)
+            import traceback
+            traceback.print_exc()  # デバッグ用：スタックトレースを出力
+            self.signal_emitter.error.emit(error_msg)
+        finally:
+            if self.db_manager:
+                self.db_manager.close()
+
+    def run2(self):
         try:
             self.db_manager = DBManager(self.db_path)
             
@@ -278,6 +355,7 @@ class ImageTableModel(QAbstractTableModel):
             # Notify view to redraw decorations (thumbnails)
             self.dataChanged.emit(self.index(0, 0), self.index(self.rowCount() - 1, self.columnCount() - 1), [Qt.ItemDataRole.DecorationRole])
 
+    # ImageTableModel.data() メソッドの修正
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
@@ -295,14 +373,20 @@ class ImageTableModel(QAbstractTableModel):
                 score = item_data.get('score')
                 return f"{score:.4f}" if score is not None else ""
             elif col == 3:
-                # タグの表示を修正：setからリストに変換して結合
-                tags = item_data.get('tags', set())
-                if isinstance(tags, set):
+                # タグの表示を修正
+                tags = item_data.get('tags', None)
+                if tags is None:
+                    return ""
+                elif isinstance(tags, set):
+                    return ', '.join(sorted(tags)) if tags else ""
+                elif isinstance(tags, list):
                     return ', '.join(sorted(tags)) if tags else ""
                 elif isinstance(tags, str):
                     return tags
                 else:
-                    return ""
+                    # デバッグ用：タグの型を確認
+                    print(f"DEBUG: Unexpected tags type for {item_data.get('file_path', 'unknown')}: {type(tags)} = {tags}")
+                    return str(tags) if tags else ""
             elif col == 4:
                 return item_data.get('file_path', '')
 
@@ -721,7 +805,74 @@ class ImageFeatureViewerApp(QMainWindow):
             self.similarity_threshold = new_threshold
             self.status_bar.showMessage(f"類似度閾値を {self.similarity_threshold:.2f} に設定しました。")
 
+    # さらに、_perform_search メソッドでもタグ取得を確実に行う修正
     def _perform_search(self):
+        if not self.db_manager:
+            self.status_bar.showMessage("エラー: DBが選択されていません。")
+            return
+
+        query_text = self.search_input.text().strip()
+        if not query_text:
+            self.status_bar.showMessage("検索キーワードを入力してください。")
+            return
+
+        try:
+            self.status_bar.showMessage("検索中...")
+            
+            if self.clip_feature_extractor is None:
+                QMessageBox.critical(self, "エラー", "CLIPモデルが初期化されていません。アプリケーションを再起動してください。")
+                return
+
+            search_feature = self.clip_feature_extractor.extract_features_from_text(query_text)
+            if np.linalg.norm(search_feature) > 0:
+                search_feature = search_feature / np.linalg.norm(search_feature)
+            else:
+                self.status_bar.showMessage("検索キーワードの特徴量が無効です。")
+                return
+
+            results = []
+            all_db_data = self.db_manager.get_all_file_metadata()
+
+            for item in all_db_data:
+                file_path = item.get('file_path')
+                clip_feature_blob = item.get('clip_feature_blob')
+
+                if clip_feature_blob:
+                    image_feature = blob_to_numpy(clip_feature_blob)
+                    if image_feature is not None:
+                        if np.linalg.norm(image_feature) > 0:
+                            image_feature = image_feature / np.linalg.norm(image_feature)
+                            similarity = np.dot(search_feature, image_feature.T)
+                            
+                            item['score'] = float(similarity)
+                            # タグ情報を確実に取得して追加
+                            try:
+                                tags = self.db_manager.get_file_tags(file_path)
+                                item['tags'] = set(tags) if tags else set()
+                            except Exception as tag_error:
+                                print(f"DEBUG: Tag retrieval error for {file_path}: {tag_error}")
+                                item['tags'] = set()
+                            results.append(item)
+
+            total_image_count = len(all_db_data)
+            
+            filtered_results = [r for r in results if r['score'] >= self.similarity_threshold]
+            sorted_results = sorted(filtered_results, key=lambda x: x['score'], reverse=True)
+            display_data = sorted_results[:self.top_n_display_count]
+            
+            self.model.set_data(display_data, total_image_count)
+            self.status_bar.showMessage(f"検索完了。上位 {len(display_data)} 件を表示中。({total_image_count} 件中)")
+
+        except sqlite3.Error as e:
+            self.status_bar.showMessage(f"検索中のデータベースエラー: {e}")
+            QMessageBox.critical(self, "データベースエラー", f"検索中にデータベースエラーが発生しました:\n{e}")
+        except Exception as e:
+            self.status_bar.showMessage(f"検索中にエラーが発生しました: {e}")
+            QMessageBox.critical(self, "検索エラー", f"検索中に予期せぬエラーが発生しました:\n{e}")
+            import traceback
+            traceback.print_exc()  # デバッグ用
+
+    def _perform_search2(self):
         if not self.db_manager:
             self.status_bar.showMessage("エラー: DBが選択されていません。")
             return

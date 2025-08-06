@@ -233,7 +233,22 @@ class DBManager:
             print(f"タグ削除エラー ({file_path}, {tag_name}): {e}", file=sys.stderr)
             return False
 
+    # db_manager.py の get_file_tags メソッドも確認用に修正版を提供
     def get_file_tags(self, file_path):
+        """
+        指定されたファイルのタグを取得します
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT tag FROM file_tags WHERE file_path = ?", (file_path,))
+            tags = [row['tag'] for row in cursor.fetchall()]
+            print(f"DEBUG: get_file_tags({os.path.basename(file_path)}) = {tags}")  # デバッグ出力
+            return tags
+        except sqlite3.Error as e:
+            print(f"タグ取得エラー ({file_path}): {e}", file=sys.stderr)
+            return []
+
+    def get_file_tags2(self, file_path):
         """
         指定されたファイルのタグを取得します
         """
