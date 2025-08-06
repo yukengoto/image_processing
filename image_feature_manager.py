@@ -1049,6 +1049,233 @@ class TagSelectionDialog(QDialog):
         
         return all_tags
 
+# image_feature_manager.py への追加コード
+# ファイル種別フィルター機能の実装
+
+from PySide6.QtWidgets import (
+    # 既存のインポートに追加
+    QButtonGroup, QRadioButton
+)
+
+# === ファイル種別フィルター用のダイアログクラス ===
+class FileTypeFilterDialog(QDialog):
+    """ファイル種別によるフィルタリングを行うダイアログ"""
+    
+    def __init__(self, parent=None, db_manager=None):
+        super().__init__(parent)
+        self.db_manager = db_manager
+        
+        self.setWindowTitle("ファイル種別フィルター")
+        self.setModal(True)
+        self.resize(400, 350)
+        
+        self._init_ui()
+        self._load_file_type_statistics()
+    
+    def _init_ui(self):
+        """UIの初期化"""
+        main_layout = QVBoxLayout(self)
+        
+        # 説明ラベル
+        description_label = QLabel("表示するファイル種別を選択してください：")
+        main_layout.addWidget(description_label)
+        
+        # ファイル種別選択エリア
+        filter_group = QGroupBox("ファイル種別")
+        main_layout.addWidget(filter_group)
+        
+        filter_layout = QVBoxLayout(filter_group)
+        
+        # ラジオボタングループ
+        self.filter_button_group = QButtonGroup(self)
+        
+        # 全て表示
+        self.all_files_radio = QRadioButton("すべてのファイル")
+        self.all_files_radio.setChecked(True)
+        self.filter_button_group.addButton(self.all_files_radio, 0)
+        filter_layout.addWidget(self.all_files_radio)
+        
+        # 画像ファイルのみ
+        self.image_files_radio = QRadioButton("画像ファイルのみ")
+        self.filter_button_group.addButton(self.image_files_radio, 1)
+        filter_layout.addWidget(self.image_files_radio)
+        
+        # 動画ファイルのみ
+        self.video_files_radio = QRadioButton("動画ファイルのみ")
+        self.filter_button_group.addButton(self.video_files_radio, 2)
+        filter_layout.addWidget(self.video_files_radio)
+        
+        # サムネイル対応ファイルのみ
+        self.thumbnail_supported_radio = QRadioButton("サムネイル表示可能ファイル")
+        self.filter_button_group.addButton(self.thumbnail_supported_radio, 3)
+        filter_layout.addWidget(self.thumbnail_supported_radio)
+        
+        # CLIP対応ファイルのみ
+        self.clip_supported_radio = QRadioButton("CLIP特徴量対応ファイル")
+        self.filter_button_group.addButton(self.clip_supported_radio, 4)
+        filter_layout.addWidget(self.clip_supported_radio)
+        
+        # 統計情報表示エリア
+        self.stats_group = QGroupBox("ファイル統計")
+        main_layout.addWidget(self.stats_group)
+        
+        stats_layout = QVBoxLayout(self.stats_group)
+        self.stats_label = QLabel("統計情報を読み込み中...")
+        stats_layout.addWidget(self.stats_label)
+        
+        # 拡張子別詳細フィルター
+        extension_group = QGroupBox("拡張子別フィルター（オプション）")
+        main_layout.addWidget(extension_group)
+        
+        extension_layout = QVBoxLayout(extension_group)
+        
+        # 拡張子チェックボックス用のスクロールエリア
+        self.extension_scroll_area = QScrollArea()
+        self.extension_scroll_area.setWidgetResizable(True)
+        self.extension_scroll_area.setMaximumHeight(150)
+        extension_layout.addWidget(self.extension_scroll_area)
+        
+        self.extension_widget = QWidget()
+        self.extension_layout = QGridLayout(self.extension_widget)
+        self.extension_scroll_area.setWidget(self.extension_widget)
+        
+        self.extension_checkboxes = {}
+        
+        # すべて選択/解除ボタン
+        extension_button_layout = QHBoxLayout()
+        self.select_all_ext_button = QPushButton("すべて選択")
+        self.select_all_ext_button.clicked.connect(self._select_all_extensions)
+        extension_button_layout.addWidget(self.select_all_ext_button)
+        
+        self.clear_all_ext_button = QPushButton("すべて解除")
+        self.clear_all_ext_button.clicked.connect(self._clear_all_extensions)
+        extension_button_layout.addWidget(self.clear_all_ext_button)
+        
+        extension_button_layout.addStretch()
+        extension_layout.addLayout(extension_button_layout)
+        
+        # メインボタン
+        button_layout = QHBoxLayout()
+        main_layout.addLayout(button_layout)
+        
+        button_layout.addStretch()
+        
+        self.apply_button = QPushButton("フィルター適用")
+        self.apply_button.clicked.connect(self.accept)
+        button_layout.addWidget(self.apply_button)
+        
+        self.cancel_button = QPushButton("キャンセル")
+        self.cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_button)
+    
+    def _load_file_type_statistics(self):
+        """データベースからファイル種別の統計情報を読み込み"""
+        if not self.db_manager:
+            self.stats_label.setText("データベースが開かれていません")
+            return
+        
+        try:
+            # 全ファイル情報を取得
+            all_files = self.db_manager.get_all_file_metadata()
+            
+            if not all_files:
+                self.stats_label.setText("データベースにファイルがありません")
+                return
+            
+            # 種別ごとの統計を計算
+            stats = {
+                'total': len(all_files),
+                'image': 0,
+                'video': 0,
+                'thumbnail_supported': 0,
+                'clip_supported': 0,
+                'other': 0,
+                'extensions': {}
+            }
+            
+            for file_info in all_files:
+                file_path = file_info.get('file_path', '')
+                
+                # 拡張子統計
+                ext = Path(file_path).suffix.lower()
+                if ext:
+                    stats['extensions'][ext] = stats['extensions'].get(ext, 0) + 1
+                
+                # 種別統計
+                if FileTypeValidator.is_image_file(file_path):
+                    stats['image'] += 1
+                elif FileTypeValidator.is_video_file(file_path):
+                    stats['video'] += 1
+                else:
+                    stats['other'] += 1
+                
+                if FileTypeValidator.supports_thumbnail(file_path):
+                    stats['thumbnail_supported'] += 1
+                
+                if FileTypeValidator.supports_clip_features(file_path):
+                    stats['clip_supported'] += 1
+            
+            # 統計情報の表示
+            stats_text = f"""全ファイル数: {stats['total']} 件
+画像ファイル: {stats['image']} 件
+動画ファイル: {stats['video']} 件  
+その他: {stats['other']} 件
+サムネイル対応: {stats['thumbnail_supported']} 件
+CLIP対応: {stats['clip_supported']} 件"""
+            
+            self.stats_label.setText(stats_text)
+            
+            # 拡張子チェックボックスを作成
+            self._create_extension_checkboxes(stats['extensions'])
+            
+        except Exception as e:
+            self.stats_label.setText(f"統計情報の読み込みエラー: {e}")
+    
+    def _create_extension_checkboxes(self, extension_stats):
+        """拡張子別チェックボックスを作成"""
+        # 拡張子を使用頻度順でソート
+        sorted_extensions = sorted(extension_stats.items(), key=lambda x: x[1], reverse=True)
+        
+        row = 0
+        col = 0
+        
+        for ext, count in sorted_extensions:
+            checkbox = QCheckBox(f"{ext} ({count})")
+            checkbox.setChecked(True)  # デフォルトで全て選択
+            
+            self.extension_checkboxes[ext] = checkbox
+            self.extension_layout.addWidget(checkbox, row, col)
+            
+            col += 1
+            if col >= 3:  # 3列で配置
+                col = 0
+                row += 1
+    
+    def _select_all_extensions(self):
+        """すべての拡張子を選択"""
+        for checkbox in self.extension_checkboxes.values():
+            checkbox.setChecked(True)
+    
+    def _clear_all_extensions(self):
+        """すべての拡張子の選択を解除"""
+        for checkbox in self.extension_checkboxes.values():
+            checkbox.setChecked(False)
+    
+    def get_filter_settings(self):
+        """選択されたフィルター設定を取得"""
+        selected_button_id = self.filter_button_group.checkedId()
+        
+        # 選択された拡張子を取得
+        selected_extensions = set()
+        for ext, checkbox in self.extension_checkboxes.items():
+            if checkbox.isChecked():
+                selected_extensions.add(ext)
+        
+        return {
+            'filter_type': selected_button_id,  # 0:全て, 1:画像, 2:動画, 3:サムネイル対応, 4:CLIP対応
+            'selected_extensions': selected_extensions
+        }
+
 
 # --- 4. メインアプリケーションウィンドウ ---
 class ImageFeatureViewerApp(QMainWindow):
@@ -1198,6 +1425,21 @@ class ImageFeatureViewerApp(QMainWindow):
         self.filter_by_tag_action.triggered.connect(self._filter_files_by_tags)
         self.filter_by_tag_action.setEnabled(False)
 
+        # 既存のメニュー初期化の後に追加
+        # フィルターメニューを追加
+        filter_menu = menubar.addMenu("フィルター")
+        
+        self.file_type_filter_action = filter_menu.addAction("ファイル種別でフィルター...")
+        self.file_type_filter_action.triggered.connect(self._show_file_type_filter_dialog)
+        self.file_type_filter_action.setEnabled(False)  # DB接続時に有効化
+        
+        filter_menu.addSeparator()
+        
+        self.clear_filters_action = filter_menu.addAction("フィルターをクリア")
+        self.clear_filters_action.triggered.connect(self._clear_all_filters)
+        self.clear_filters_action.setEnabled(False)
+
+
     def _populate_recent_files_menu(self):
         self.recent_files_menu.clear()
         if not self.recent_db_paths:
@@ -1277,6 +1519,7 @@ class ImageFeatureViewerApp(QMainWindow):
         if db_path:
             self._open_db(db_path)
 
+        
     def _open_db(self, db_path):
         if not os.path.exists(db_path) and not db_path.lower().endswith(".db"):
             QMessageBox.warning(self, "エラー", f"指定されたDBファイルが見つかりません:\n{db_path}")
@@ -1318,6 +1561,10 @@ class ImageFeatureViewerApp(QMainWindow):
             self.filter_by_tag_action.setEnabled(False)
         except Exception as e:
             QMessageBox.critical(self, "初期化エラー", f"アプリケーションの初期化中にエラーが発生しました:\n{e}")
+
+        # ファイル種別フィルターアクションを有効化
+        if hasattr(self, 'file_type_filter_action'):
+            self.file_type_filter_action.setEnabled(True)
 
     def _on_thumbnail_size_changed(self, index=None):
         """サムネイルサイズのコンボボックスが変更されたときのハンドラ"""
@@ -1821,6 +2068,116 @@ class ImageFeatureViewerApp(QMainWindow):
         
         self.status_bar.showMessage(f"画像データの読み込み中にエラーが発生しました: {error_message}")
         QMessageBox.critical(self, "データ読み込みエラー", f"画像データの読み込み中にエラーが発生しました:\n{error_message}")
+
+    # === ImageFeatureViewerApp クラスへの追加メソッド ===
+
+    def _show_file_type_filter_dialog(self):
+        """ファイル種別フィルターダイアログを表示"""
+        if not self.db_manager:
+            QMessageBox.warning(self, "エラー", "DBが開かれていません。")
+            return
+        
+        dialog = FileTypeFilterDialog(self, self.db_manager)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            filter_settings = dialog.get_filter_settings()
+            self._apply_file_type_filter(filter_settings)
+
+    def _apply_file_type_filter(self, filter_settings):
+        """ファイル種別フィルターを適用"""
+        if not self.db_manager:
+            return
+        
+        try:
+            self.status_bar.showMessage("ファイル種別フィルターを適用中...")
+            
+            # 全ファイル情報を取得
+            all_files = self.db_manager.get_all_file_metadata()
+            
+            if not all_files:
+                QMessageBox.information(self, "情報", "データベースにファイルがありません。")
+                return
+            
+            filtered_files = []
+            filter_type = filter_settings['filter_type']
+            selected_extensions = filter_settings['selected_extensions']
+            
+            for file_info in all_files:
+                file_path = file_info.get('file_path', '')
+                ext = Path(file_path).suffix.lower()
+                
+                # 拡張子フィルターをチェック
+                if selected_extensions and ext not in selected_extensions:
+                    continue
+                
+                # ファイル種別フィルターをチェック
+                if filter_type == 0:  # すべてのファイル
+                    include_file = True
+                elif filter_type == 1:  # 画像ファイルのみ
+                    include_file = FileTypeValidator.is_image_file(file_path)
+                elif filter_type == 2:  # 動画ファイルのみ
+                    include_file = FileTypeValidator.is_video_file(file_path)
+                elif filter_type == 3:  # サムネイル対応ファイル
+                    include_file = FileTypeValidator.supports_thumbnail(file_path)
+                elif filter_type == 4:  # CLIP対応ファイル
+                    include_file = FileTypeValidator.supports_clip_features(file_path)
+                else:
+                    include_file = True
+                
+                if include_file:
+                    # タグ情報を追加
+                    try:
+                        tags = self.db_manager.get_file_tags(file_path)
+                        file_info['tags'] = set(tags) if tags else set()
+                    except Exception:
+                        file_info['tags'] = set()
+                    
+                    file_info['score'] = None  # 検索ではないのでスコアはNone
+                    filtered_files.append(file_info)
+            
+            # 表示件数制限を適用
+            display_files = filtered_files[:self.top_n_display_count]
+            
+            # モデルを更新
+            self.model.set_data(display_files, len(filtered_files))
+            
+            # フィルター情報を作成
+            filter_type_names = {
+                0: "すべて",
+                1: "画像ファイル", 
+                2: "動画ファイル",
+                3: "サムネイル対応",
+                4: "CLIP対応"
+            }
+            
+            filter_desc = filter_type_names.get(filter_type, "不明")
+            
+            if selected_extensions:
+                ext_desc = f"拡張子: {', '.join(sorted(selected_extensions))}"
+                if len(selected_extensions) > 5:
+                    ext_desc = f"拡張子: {len(selected_extensions)}種類選択"
+            else:
+                ext_desc = "全拡張子"
+            
+            self.status_bar.showMessage(
+                f"フィルター適用完了: {filter_desc}, {ext_desc} - "
+                f"{len(display_files)}/{len(filtered_files)} 件表示"
+            )
+            
+            # フィルタークリアボタンを有効化
+            if hasattr(self, 'clear_filters_action'):
+                self.clear_filters_action.setEnabled(True)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "フィルターエラー", f"ファイル種別フィルター中にエラーが発生しました:\n{e}")
+            self.status_bar.showMessage(f"フィルターエラー: {e}")
+
+    def _clear_all_filters(self):
+        """すべてのフィルターをクリアして全画像を表示"""
+        self._display_all_images_from_db_async()
+        if hasattr(self, 'clear_filters_action'):
+            self.clear_filters_action.setEnabled(False)
+
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
