@@ -3,6 +3,16 @@ import os
 import json
 import sqlite3
 import numpy as np
+import mimetypes
+from pathlib import Path
+
+# === 適用方法 ===
+# 1. FileTypeValidator クラスを追加
+# 2. ThumbnailGenerator を SafeThumbnailGenerator に置換
+# 3. FeatureExtractor を SafeFeatureExtractor に置換  
+# 4. ImageTableModel.data メソッドを safe_data に置換
+# 5. ImageAdder.run メソッドを safe_image_adder_run に置換
+# 6. インポート文に mimetypes, pathlib.Path を追加
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -26,7 +36,149 @@ class ThumbnailSignalEmitter(QObject):
     thumbnail_ready = Signal(QModelIndex, QPixmap)
     error = Signal(str)
 
+# image_feature_manager.py の安全性向上のための修正
+
+# === ファイル形式チェック用のユーティリティクラス ===
+class FileTypeValidator:
+    """ファイル形式の検証とカテゴリ分類を行うクラス"""
+    
+    # 対応する画像形式
+    SUPPORTED_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.ico', '.svg'}
+    
+    # 対応する動画形式（将来的な拡張用）
+    SUPPORTED_VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v'}
+    
+    # サムネイル生成可能な形式（QPixmapで読み込み可能）
+    THUMBNAIL_SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.ico'}
+    
+    # CLIP特徴量抽出可能な形式
+    CLIP_SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp'}
+    
+    @classmethod
+    def is_image_file(cls, file_path):
+        """画像ファイルかどうかを判定"""
+        ext = Path(file_path).suffix.lower()
+        return ext in cls.SUPPORTED_IMAGE_EXTENSIONS
+    
+    @classmethod
+    def is_video_file(cls, file_path):
+        """動画ファイルかどうかを判定"""
+        ext = Path(file_path).suffix.lower()
+        return ext in cls.SUPPORTED_VIDEO_EXTENSIONS
+    
+    @classmethod
+    def supports_thumbnail(cls, file_path):
+        """サムネイル生成に対応しているかを判定"""
+        ext = Path(file_path).suffix.lower()
+        return ext in cls.THUMBNAIL_SUPPORTED_EXTENSIONS
+    
+    @classmethod
+    def supports_clip_features(cls, file_path):
+        """CLIP特徴量抽出に対応しているかを判定"""
+        ext = Path(file_path).suffix.lower()
+        return ext in cls.CLIP_SUPPORTED_EXTENSIONS
+    
+    @classmethod
+    def get_file_category(cls, file_path):
+        """ファイルのカテゴリを取得"""
+        if cls.is_image_file(file_path):
+            return "image"
+        elif cls.is_video_file(file_path):
+            return "video"
+        else:
+            return "other"
+    
+    @classmethod
+    def validate_file_integrity(cls, file_path):
+        """ファイルの整合性を基本チェック"""
+        try:
+            if not os.path.exists(file_path):
+                return False, "ファイルが存在しません"
+            
+            if not os.path.isfile(file_path):
+                return False, "ディレクトリです"
+            
+            if os.path.getsize(file_path) == 0:
+                return False, "ファイルサイズが0です"
+            
+            # MIMEタイプによる基本検証
+            mime_type, _ = mimetypes.guess_type(file_path)
+            if mime_type and not mime_type.startswith(('image/', 'video/')):
+                if not cls.is_image_file(file_path) and not cls.is_video_file(file_path):
+                    return False, f"サポートされていないファイル形式: {mime_type}"
+            
+            return True, "OK"
+        except Exception as e:
+            return False, f"検証エラー: {e}"
+
+
+# === 改良されたThumbnailGenerator ===
+#class SafeThumbnailGenerator(QRunnable):
 class ThumbnailGenerator(QRunnable):
+    """安全性を向上させたサムネイル生成タスク"""
+    
+    def __init__(self, image_path, size: QSize, index, signal_emitter):
+        super().__init__()
+        self.image_path = image_path
+        self.size = size
+        self.index = index
+        self.signal_emitter = signal_emitter
+
+    def run(self):
+        try:
+            # ファイルの事前検証
+            is_valid, error_msg = FileTypeValidator.validate_file_integrity(self.image_path)
+            if not is_valid:
+                self.signal_emitter.error.emit(f"ファイル検証エラー ({os.path.basename(self.image_path)}): {error_msg}")
+                return
+            
+            # サムネイル対応チェック
+            if not FileTypeValidator.supports_thumbnail(self.image_path):
+                # サポートされていない形式の場合、デフォルトアイコンを返すか、何もしない
+                return
+            
+            # 画像読み込み前のサイズチェック
+            try:
+                file_size = os.path.getsize(self.image_path)
+                if file_size > 50 * 1024 * 1024:  # 50MB制限
+                    self.signal_emitter.error.emit(f"ファイルサイズが大きすぎます ({os.path.basename(self.image_path)}): {file_size / (1024*1024):.1f}MB")
+                    return
+            except OSError as e:
+                self.signal_emitter.error.emit(f"ファイルサイズ取得エラー ({os.path.basename(self.image_path)}): {e}")
+                return
+
+            # QPixmapで画像を読み込み
+            original_pixmap = QPixmap(self.image_path)
+            
+            if original_pixmap.isNull():
+                self.signal_emitter.error.emit(f"画像読み込み失敗 ({os.path.basename(self.image_path)}): QPixmapで読み込めません")
+                return
+
+            # 異常に大きな画像のチェック
+            if original_pixmap.width() > 10000 or original_pixmap.height() > 10000:
+                self.signal_emitter.error.emit(f"画像サイズが大きすぎます ({os.path.basename(self.image_path)}): {original_pixmap.width()}x{original_pixmap.height()}")
+                return
+
+            # サムネイル生成
+            pixmap = original_pixmap.scaled(
+                self.size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            
+            if pixmap.isNull():
+                self.signal_emitter.error.emit(f"サムネイル生成失敗 ({os.path.basename(self.image_path)})")
+                return
+
+            self.signal_emitter.thumbnail_ready.emit(self.index, pixmap)
+            
+        except Exception as e:
+            error_msg = f"サムネイル生成中の予期せぬエラー ({os.path.basename(self.image_path)}): {e}"
+            print(error_msg, file=sys.stderr)
+            self.signal_emitter.error.emit(error_msg)
+
+
+class ThumbnailGenerator2(QRunnable):
     """画像を読み込み、サムネイルを生成するタスク (ディスクキャッシュなし)"""
     def __init__(self, image_path, size: QSize, index, signal_emitter):
         super().__init__()
@@ -228,7 +380,115 @@ class FeatureExtractionSignalEmitter(QObject):
     finished = Signal(int)  # 処理されたファイル数
     error = Signal(str)
 
+# === 改良されたFeatureExtractor ===
 class FeatureExtractor(QRunnable):
+#class SafeFeatureExtractor(QRunnable):
+    """安全性を向上させた特徴量抽出タスク"""
+    
+    def __init__(self, db_path: str, files_without_features: list, signal_emitter: FeatureExtractionSignalEmitter):
+        super().__init__()
+        self.db_path = db_path
+        self.files_without_features = files_without_features
+        self.signal_emitter = signal_emitter
+        self.db_manager = None
+        self.clip_feature_extractor = None
+
+    def run(self):
+        try:
+            self.db_manager = DBManager(self.db_path)
+            self.clip_feature_extractor = CLIPFeatureExtractor()
+            
+            # 対応ファイルのみをフィルタリング
+            valid_files = []
+            skipped_count = 0
+            
+            for file_path in self.files_without_features:
+                is_valid, error_msg = FileTypeValidator.validate_file_integrity(file_path)
+                if is_valid and FileTypeValidator.supports_clip_features(file_path):
+                    valid_files.append(file_path)
+                else:
+                    skipped_count += 1
+                    if not is_valid:
+                        print(f"スキップ ({os.path.basename(file_path)}): {error_msg}", file=sys.stderr)
+                    else:
+                        print(f"スキップ (非対応形式): {os.path.basename(file_path)}", file=sys.stderr)
+            
+            total_files = len(valid_files)
+            
+            if total_files == 0:
+                if skipped_count > 0:
+                    self.signal_emitter.error.emit(f"{skipped_count} 個のファイルがスキップされました（非対応形式または破損ファイル）")
+                self.signal_emitter.finished.emit(0)
+                return
+
+            if skipped_count > 0:
+                self.signal_emitter.progress_update.emit(0, total_files, f"{skipped_count} 個のファイルをスキップしました")
+
+            # 特徴量抽出の進捗を手動で追跡
+            extracted_features = []
+            processed_indices = []
+            
+            for i, file_path in enumerate(valid_files):
+                try:
+                    self.signal_emitter.progress_update.emit(
+                        i + 1, 
+                        total_files, 
+                        f"特徴量抽出中: {os.path.basename(file_path)}"
+                    )
+                    
+                    # 個別に特徴量を抽出
+                    features, indices = self.clip_feature_extractor.extract_features_from_paths([file_path])
+                    if len(features) > 0:
+                        extracted_features.append(features[0])
+                        processed_indices.append(i)
+                    else:
+                        print(f"特徴量抽出失敗: {os.path.basename(file_path)}", file=sys.stderr)
+                    
+                except Exception as e:
+                    error_msg = f"特徴量抽出エラー ({os.path.basename(file_path)}): {e}"
+                    print(error_msg, file=sys.stderr)
+                    continue
+            
+            if len(extracted_features) == 0:
+                self.signal_emitter.finished.emit(0)
+                return
+
+            # データベース更新フェーズ
+            updated_count = 0
+            for i, (feature, original_index) in enumerate(zip(extracted_features, processed_indices)):
+                file_path = valid_files[original_index]
+                
+                try:
+                    feature_blob = numpy_to_blob(feature)
+                    self.db_manager.insert_or_update_file_metadata(
+                        file_path=file_path,
+                        clip_feature_blob=feature_blob
+                    )
+                    updated_count += 1
+                    
+                    self.signal_emitter.progress_update.emit(
+                        i + 1, 
+                        len(extracted_features), 
+                        f"DB更新中: {os.path.basename(file_path)}"
+                    )
+                except Exception as e:
+                    error_msg = f"特徴量更新エラー ({os.path.basename(file_path)}): {e}"
+                    print(error_msg, file=sys.stderr)
+            
+            self.signal_emitter.finished.emit(updated_count)
+            
+        except Exception as e:
+            error_msg = f"特徴量抽出処理中にエラーが発生しました: {e}"
+            print(error_msg, file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+            self.signal_emitter.error.emit(error_msg)
+        finally:
+            if self.db_manager:
+                self.db_manager.close()
+
+
+class FeatureExtractor2(QRunnable):
     """画像ファイルの特徴量を抽出するタスク"""
     def __init__(self, db_path: str, files_without_features: list, signal_emitter: FeatureExtractionSignalEmitter):
         super().__init__()
@@ -355,8 +615,78 @@ class ImageTableModel(QAbstractTableModel):
             # Notify view to redraw decorations (thumbnails)
             self.dataChanged.emit(self.index(0, 0), self.index(self.rowCount() - 1, self.columnCount() - 1), [Qt.ItemDataRole.DecorationRole])
 
-    # ImageTableModel.data() メソッドの修正
+    # === ImageTableModel の修正 ===
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+    # def safe_data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        """安全性を向上させたdataメソッド"""
+        if not index.isValid():
+            return None
+
+        row = index.row()
+        col = index.column()
+        
+        if row >= len(self._data):
+            return None
+            
+        item_data = self._data[row]
+
+        if role == Qt.ItemDataRole.DisplayRole:
+            if col == 0:
+                return ""
+            elif col == 1:
+                return os.path.basename(item_data.get('file_path', ''))
+            elif col == 2:
+                score = item_data.get('score')
+                return f"{score:.4f}" if score is not None else ""
+            elif col == 3:
+                # タグの表示（安全性向上）
+                tags = item_data.get('tags', None)
+                if tags is None:
+                    return ""
+                elif isinstance(tags, (set, list)):
+                    return ', '.join(sorted(tags)) if tags else ""
+                elif isinstance(tags, str):
+                    return tags
+                else:
+                    return str(tags) if tags else ""
+            elif col == 4:
+                return item_data.get('file_path', '')
+
+        elif role == Qt.ItemDataRole.DecorationRole and col == 0:
+            # サムネイルサイズが0の場合は何も返さない
+            if self.thumbnail_size.width() == 0:
+                return None
+                
+            file_path = item_data.get('file_path')
+            if not file_path:
+                return QPixmap()
+                
+            if file_path in self.thumbnail_cache:
+                return self.thumbnail_cache[file_path]
+            else:
+                # ファイル存在確認とサムネイル対応チェック
+                if (file_path and os.path.exists(file_path) and 
+                    FileTypeValidator.supports_thumbnail(file_path)):
+                    
+                    # SafeThumbnailGeneratorを使用
+                    generator = ThumbnailGenerator(
+                        image_path=file_path,
+                        size=self.thumbnail_size,
+                        index=index,
+                        signal_emitter=self.thumbnail_signal_emitter
+                    )
+                    self.thread_pool.start(generator)
+                return QPixmap()
+        
+        elif role == Qt.ItemDataRole.TextAlignmentRole:
+            if col == 0:
+                return Qt.AlignmentFlag.AlignCenter
+            return Qt.AlignmentFlag.AlignLeft
+
+        return None
+
+    # ImageTableModel.data() メソッドの修正
+    def data2(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
 
@@ -453,7 +783,7 @@ class ImageAdder(QRunnable):
         self.signal_emitter = signal_emitter
         self.db_manager = None # 各スレッドで個別にインスタンス化
 
-    def run(self):
+    def run2(self):
         added_count = 0
         total_files = len(self.image_paths)
         self.signal_emitter.progress_update.emit(f"データベースに {total_files} 個の画像を追加中...")
@@ -497,6 +827,69 @@ class ImageAdder(QRunnable):
         finally:
             if self.db_manager:
                 self.db_manager.close() # 処理終了時に接続を閉じる
+
+    # === ImageAdder の修正 ===
+    def run(self):
+    #def safe_image_adder_run(self):
+        """安全性を向上させたImageAdder.runメソッド"""
+        added_count = 0
+        skipped_count = 0
+        total_files = len(self.image_paths)
+        
+        self.signal_emitter.progress_update.emit(f"データベースに {total_files} 個のファイルを追加中...")
+
+        try:
+            self.db_manager = DBManager(self.db_path)
+            
+            for i, file_path in enumerate(self.image_paths):
+                # ファイル検証
+                is_valid, error_msg = FileTypeValidator.validate_file_integrity(file_path)
+                if not is_valid:
+                    self.signal_emitter.progress_update.emit(f"スキップ: {os.path.basename(file_path)} ({error_msg})")
+                    skipped_count += 1
+                    continue
+                
+                # 画像ファイルかチェック
+                if not FileTypeValidator.is_image_file(file_path):
+                    self.signal_emitter.progress_update.emit(f"スキップ (非画像ファイル): {os.path.basename(file_path)}")
+                    skipped_count += 1
+                    continue
+                
+                try:
+                    # ファイルのメタデータを取得
+                    stat_info = os.stat(file_path)
+                    file_size = stat_info.st_size
+                    creation_time = str(stat_info.st_ctime)
+                    last_modified_time = str(stat_info.st_mtime)
+
+                    self.db_manager.insert_or_update_file_metadata(
+                        file_path=file_path,
+                        file_size=file_size,
+                        time_created=creation_time,
+                        time_modified=last_modified_time,
+                        clip_feature_blob=None
+                    )
+                    added_count += 1
+                    self.signal_emitter.progress_update.emit(f"追加中: {added_count}/{total_files - skipped_count} ({os.path.basename(file_path)})")
+                    
+                except Exception as e:
+                    error_msg = f"ファイル '{file_path}' の追加中にエラーが発生しました: {e}"
+                    print(error_msg, file=sys.stderr)
+                    self.signal_emitter.error.emit(f"ファイル追加エラー ({os.path.basename(file_path)}): {e}")
+                    skipped_count += 1
+            
+            if skipped_count > 0:
+                self.signal_emitter.progress_update.emit(f"完了: {added_count} 個追加、{skipped_count} 個スキップ")
+            
+            self.signal_emitter.finished.emit(added_count)
+            
+        except Exception as e:
+            error_msg = f"データベース処理中にエラーが発生しました: {e}"
+            print(error_msg, file=sys.stderr)
+            self.signal_emitter.error.emit(error_msg)
+        finally:
+            if self.db_manager:
+                self.db_manager.close()
 
 # image_feature_manager.py に追加するコード
 
