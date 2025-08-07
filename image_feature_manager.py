@@ -601,40 +601,88 @@ class TagSelectionDialog(QDialog):
         self.db_manager = db_manager
         self.current_tags = current_tags or set()
         self.allow_new_tags = allow_new_tags
-        
         self.setWindowTitle(title)
         self.setModal(True)
         self.resize(400, 500)
-        
         self.selected_existing_tags = set()
         self.new_tags_text = ""
-        
+        self.tag_checkboxes = {}
         self._init_ui()
-        self._load_existing_tags()
-    
+    def _make_tristate_checkbox(self, tag):
+        checkbox = QCheckBox(tag)
+        checkbox.setTristate(True)
+        checkbox.setCheckState(Qt.PartiallyChecked)
+        def on_click():
+            state = checkbox.checkState()
+            if state == Qt.Checked:
+                checkbox.setCheckState(Qt.Unchecked)
+            elif state == Qt.Unchecked:
+                checkbox.setCheckState(Qt.PartiallyChecked)
+            else:
+                checkbox.setCheckState(Qt.Checked)
+        checkbox.clicked.connect(on_click)
+        return checkbox
+
     def _init_ui(self):
-        """UIの初期化"""
         main_layout = QVBoxLayout(self)
-        
         # 既存タグ選択エリア
         existing_tags_group = QGroupBox("既存のタグから選択")
         main_layout.addWidget(existing_tags_group)
-        
         existing_layout = QVBoxLayout(existing_tags_group)
-        
         # スクロールエリア
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         existing_layout.addWidget(self.scroll_area)
-        
         # チェックボックスを配置するウィジェット
         self.checkbox_widget = QWidget()
         self.checkbox_layout = QGridLayout(self.checkbox_widget)
         self.scroll_area.setWidget(self.checkbox_widget)
-        
         self.tag_checkboxes = {}
-        
+        # 既存タグをロード
+        if self.db_manager:
+            try:
+                cursor = self.db_manager.conn.cursor()
+                cursor.execute("SELECT DISTINCT tag FROM file_tags ORDER BY tag")
+                existing_tags = [row[0] for row in cursor.fetchall()]
+                row = 0
+                col = 0
+                for tag in existing_tags:
+                    checkbox = self._make_tristate_checkbox(tag)
+                    self.checkbox_layout.addWidget(checkbox, row, col)
+                    self.tag_checkboxes[tag] = checkbox
+                    col += 1
+                    if col >= 2:
+                        col = 0
+                        row += 1
+            except Exception as e:
+                error_label = QLabel(f"タグの読み込みエラー: {e}")
+                error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.checkbox_layout.addWidget(error_label, 0, 0, 1, 2)
         # 新規タグ入力エリア（オプション）
+        if self.allow_new_tags:
+            new_tags_group = QGroupBox("新しいタグを追加（カンマ区切り）")
+            main_layout.addWidget(new_tags_group)
+            new_tags_layout = QVBoxLayout(new_tags_group)
+            self.new_tags_input = QLineEdit()
+            self.new_tags_input.setPlaceholderText("新しいタグ1, 新しいタグ2, ...")
+            new_tags_layout.addWidget(self.new_tags_input)
+        # ボタン
+        button_layout = QHBoxLayout()
+        main_layout.addLayout(button_layout)
+        self.select_all_button = QPushButton("すべて選択")
+        self.select_all_button.clicked.connect(self._select_all_tags)
+        button_layout.addWidget(self.select_all_button)
+        self.clear_all_button = QPushButton("すべて解除")
+        self.clear_all_button.clicked.connect(self._clear_all_tags)
+        button_layout.addWidget(self.clear_all_button)
+        button_layout.addStretch()
+        self.ok_button = QPushButton("OK")
+        self.ok_button.clicked.connect(self.accept)
+        button_layout.addWidget(self.ok_button)
+        self.cancel_button = QPushButton("キャンセル")
+        self.cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_button)
+    # _load_existing_tagsは不要になりました
         if self.allow_new_tags:
             new_tags_group = QGroupBox("新しいタグを追加（カンマ区切り）")
             main_layout.addWidget(new_tags_group)
@@ -643,29 +691,7 @@ class TagSelectionDialog(QDialog):
             self.new_tags_input = QLineEdit()
             self.new_tags_input.setPlaceholderText("新しいタグ1, 新しいタグ2, ...")
             new_tags_layout.addWidget(self.new_tags_input)
-        
-        # ボタン
-        button_layout = QHBoxLayout()
-        main_layout.addLayout(button_layout)
-        
-        self.select_all_button = QPushButton("すべて選択")
-        self.select_all_button.clicked.connect(self._select_all_tags)
-        button_layout.addWidget(self.select_all_button)
-        
-        self.clear_all_button = QPushButton("すべて解除")
-        self.clear_all_button.clicked.connect(self._clear_all_tags)
-        button_layout.addWidget(self.clear_all_button)
-        
-        button_layout.addStretch()
-        
-        self.ok_button = QPushButton("OK")
-        self.ok_button.clicked.connect(self.accept)
-        button_layout.addWidget(self.ok_button)
-        
-        self.cancel_button = QPushButton("キャンセル")
-        self.cancel_button.clicked.connect(self.reject)
-        button_layout.addWidget(self.cancel_button)
-    
+            
     def _load_existing_tags(self):
         """データベースから既存のタグを読み込んでチェックボックスを作成"""
         if not self.db_manager:
