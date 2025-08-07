@@ -1302,6 +1302,25 @@ class ImageFeatureViewerApp(QMainWindow):
 
         self.move(self.window_x, self.window_y)
 
+        # Gemini suggested code but don't know if this is needed
+        # # 起動時にDBパスが設定されている場合、ここでモデルをロード
+        # if self.db_path:
+        #     progress_dialog = QProgressDialog(
+        #         "CLIPモデルをロード中です...", 
+        #         "キャンセル", 0, 0, self
+        #     )
+        #     progress_dialog.setWindowTitle("初期化")
+        #     progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        #     progress_dialog.setCancelButton(None)
+        #     progress_dialog.show()
+        #     QApplication.processEvents() # UIを更新するために必要
+        #     try:
+        #         self.clip_feature_extractor = CLIPFeatureExtractor()
+        #     except Exception as e:
+        #         QMessageBox.critical(self, "エラー", f"CLIPモデルのロードに失敗しました:\n{e}")
+        #         self.clip_feature_extractor = None
+        #     progress_dialog.close()
+
         self._init_ui()
         self._init_menu()
         
@@ -1533,7 +1552,21 @@ class ImageFeatureViewerApp(QMainWindow):
             # メインスレッド用のDBManagerインスタンス
             self.db_manager = DBManager(self.db_path) 
             if self.clip_feature_extractor is None:
+                # プログレスダイアログの表示
+                progress_dialog = QProgressDialog(
+                    "CLIPモデルをロード中です...", 
+                    "キャンセル", 0, 0, self
+                )
+                progress_dialog.setWindowTitle("初期化")
+                progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+                progress_dialog.setCancelButton(None) # キャンセルボタンを無効化
+                progress_dialog.show()
+                #
+                # CLIPモデルの初期化
+                #
                 self.clip_feature_extractor = CLIPFeatureExtractor()
+                # ダイアログを閉じる
+                progress_dialog.close()
 
             self._add_recent_db_path(self.db_path)
             
