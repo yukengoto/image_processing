@@ -1002,6 +1002,336 @@ CLIP対応: {stats['clip_supported']} 件"""
             'selected_extensions': selected_extensions
         }
 
+class FilterSidePanel(QWidget):
+    """タグとファイル種別フィルターのサイドパネル"""
+    
+    filter_changed = Signal()  # フィルター条件が変更されたときのシグナル
+    
+    def __init__(self, parent=None, db_manager=None):
+        super().__init__(parent)
+        self.db_manager = db_manager
+        self.selected_tags = set()
+        self.excluded_tags = set()
+        self.selected_file_types = set()
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # ファイル種別フィルター
+        file_type_group = QGroupBox("ファイル種別")
+        file_type_layout = QVBoxLayout(file_type_group)
+        
+        self.file_type_checkboxes = {}
+        file_types = [
+            ("画像ファイル", "image"),
+            ("動画ファイル", "video"),
+            ("サムネイル対応", "thumbnail"),
+            ("CLIP対応", "clip")
+        ]
+        
+        for label, type_id in file_types:
+            cb = QCheckBox(label)
+            cb.stateChanged.connect(self._on_filter_changed)
+            self.file_type_checkboxes[type_id] = cb
+            file_type_layout.addWidget(cb)
+        
+        layout.addWidget(file_type_group)
+        
+        # タグフィルター
+        tag_group = QGroupBox("タグフィルター")
+        tag_layout = QVBoxLayout(tag_group)
+        
+        # タグ検索
+        self.tag_search = QLineEdit()
+        self.tag_search.setPlaceholderText("タグを検索...")
+        self.tag_search.textChanged.connect(self._filter_tag_list)
+        tag_layout.addWidget(self.tag_search)
+        
+        # タグリスト（スクロール可能）
+        self.tag_list = QScrollArea()
+        self.tag_list.setWidgetResizable(True)
+        self.tag_widget = QWidget()
+        self.tag_layout = QVBoxLayout(self.tag_widget)
+        self.tag_list.setWidget(self.tag_widget)
+        self.tag_list.setMinimumHeight(300)
+        tag_layout.addWidget(self.tag_list)
+        
+        # タグ選択ボタン
+        button_layout = QHBoxLayout()
+        self.select_all_tags = QPushButton("すべて選択")
+        self.clear_all_tags = QPushButton("選択解除")
+        self.select_all_tags.clicked.connect(self._select_all_tags)
+        self.clear_all_tags.clicked.connect(self._clear_all_tags)
+        button_layout.addWidget(self.select_all_tags)
+        button_layout.addWidget(self.clear_all_tags)
+        tag_layout.addLayout(button_layout)
+        
+        layout.addWidget(tag_group)
+        
+        # フィルタークリアボタン
+        self.clear_filters_button = QPushButton("フィルターをクリア")
+        self.clear_filters_button.clicked.connect(self._clear_all_filters)
+        layout.addWidget(self.clear_filters_button)
+        
+        layout.addStretch()
+
+    def update_tag_list(self):
+        """データベースから最新のタグリストを取得して表示を更新"""
+        if not self.db_manager:
+            return
+        
+        # 既存のタグチェックボックスをクリア
+        for i in reversed(range(self.tag_layout.count())):
+            widget = self.tag_layout.itemAt(i).widget()
+            if widget:
+                widget.deleteLater()
+        
+        # データベースから全タグを取得
+        try:
+            cursor = self.db_manager.conn.cursor()
+            cursor.execute("""
+                SELECT tag, COUNT(DISTINCT file_path) as count 
+                FROM file_tags 
+                GROUP BY tag 
+                ORDER BY count DESC, tag
+            """)
+            
+            self.tag_checkboxes = {}
+            for tag, count in cursor.fetchall():
+                checkbox = QCheckBox(f"{tag} ({count})")
+                checkbox.setTristate(True)
+                checkbox.tag_name = tag  # タグ名を保存
+                checkbox.stateChanged.connect(self._on_filter_changed)
+                self.tag_checkboxes[tag] = checkbox
+                self.tag_layout.addWidget(checkbox)
+            
+            self.tag_layout.addStretch()
+            
+        except Exception as e:
+            print(f"タグリストの更新エラー: {e}")
+
+    def get_current_filters(self):
+        """現在のフィルター設定を取得"""
+        file_types = set()
+        for type_id, cb in self.file_type_checkboxes.items():
+            if cb.isChecked():
+                file_types.add(type_id)
+        
+        include_tags = set()
+        exclude_tags = set()
+        for tag, cb in self.tag_checkboxes.items():
+            if cb.checkState() == Qt.Checked:
+                include_tags.add(tag)
+            elif cb.checkState() == Qt.Unchecked:
+                exclude_tags.add(tag)
+        
+        return {
+            'file_types': file_types,
+            'include_tags': include_tags,
+            'exclude_tags': exclude_tags
+        }
+
+    def _on_filter_changed(self):
+        """フィルター条件が変更されたときの処理"""
+        self.filter_changed.emit()
+
+    def _filter_tag_list(self, search_text):
+        """タグリストを検索テキストでフィルタリング"""
+        search_text = search_text.lower()
+        for tag, checkbox in self.tag_checkboxes.items():
+            checkbox.setVisible(search_text in tag.lower())
+
+    def _select_all_tags(self):
+        """すべてのタグを選択"""
+        for checkbox in self.tag_checkboxes.values():
+            if checkbox.isVisible():
+                checkbox.setCheckState(Qt.Checked)
+
+    def _clear_all_tags(self):
+        """すべてのタグの選択を解除"""
+        for checkbox in self.tag_checkboxes.values():
+            if checkbox.isVisible():
+                checkbox.setCheckState(Qt.PartiallyChecked)
+
+    def _clear_all_filters(self):
+        """すべてのフィルターをクリア"""
+        # ファイル種別フィルターをクリア
+        for checkbox in self.file_type_checkboxes.values():
+            checkbox.setChecked(False)
+        
+        # タグフィルターをクリア
+        for checkbox in self.tag_checkboxes.values():
+            checkbox.setCheckState(Qt.PartiallyChecked)
+        
+        self.filter_changed.emit()
+
+class FilterSidePanel(QWidget):
+    """タグとファイル種別フィルターのサイドパネル"""
+    
+    filter_changed = Signal()  # フィルター条件が変更されたときのシグナル
+    
+    def __init__(self, parent=None, db_manager=None):
+        super().__init__(parent)
+        self.db_manager = db_manager
+        self.selected_tags = set()
+        self.excluded_tags = set()
+        self.selected_file_types = set()
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # ファイル種別フィルター
+        file_type_group = QGroupBox("ファイル種別")
+        file_type_layout = QVBoxLayout(file_type_group)
+        
+        self.file_type_checkboxes = {}
+        file_types = [
+            ("画像ファイル", "image"),
+            ("動画ファイル", "video"),
+            ("サムネイル対応", "thumbnail"),
+            ("CLIP対応", "clip")
+        ]
+        
+        for label, type_id in file_types:
+            cb = QCheckBox(label)
+            cb.stateChanged.connect(self._on_filter_changed)
+            self.file_type_checkboxes[type_id] = cb
+            file_type_layout.addWidget(cb)
+        
+        layout.addWidget(file_type_group)
+        
+        # タグフィルター
+        tag_group = QGroupBox("タグフィルター")
+        tag_layout = QVBoxLayout(tag_group)
+        
+        # タグ検索
+        self.tag_search = QLineEdit()
+        self.tag_search.setPlaceholderText("タグを検索...")
+        self.tag_search.textChanged.connect(self._filter_tag_list)
+        tag_layout.addWidget(self.tag_search)
+        
+        # タグリスト（スクロール可能）
+        self.tag_list = QScrollArea()
+        self.tag_list.setWidgetResizable(True)
+        self.tag_widget = QWidget()
+        self.tag_layout = QVBoxLayout(self.tag_widget)
+        self.tag_list.setWidget(self.tag_widget)
+        self.tag_list.setMinimumHeight(300)
+        tag_layout.addWidget(self.tag_list)
+        
+        # タグ選択ボタン
+        button_layout = QHBoxLayout()
+        self.select_all_tags = QPushButton("すべて選択")
+        self.clear_all_tags = QPushButton("選択解除")
+        self.select_all_tags.clicked.connect(self._select_all_tags)
+        self.clear_all_tags.clicked.connect(self._clear_all_tags)
+        button_layout.addWidget(self.select_all_tags)
+        button_layout.addWidget(self.clear_all_tags)
+        tag_layout.addLayout(button_layout)
+        
+        layout.addWidget(tag_group)
+        
+        # フィルタークリアボタン
+        self.clear_filters_button = QPushButton("フィルターをクリア")
+        self.clear_filters_button.clicked.connect(self._clear_all_filters)
+        layout.addWidget(self.clear_filters_button)
+        
+        layout.addStretch()
+
+    def update_tag_list(self):
+        """データベースから最新のタグリストを取得して表示を更新"""
+        if not self.db_manager:
+            return
+        
+        # 既存のタグチェックボックスをクリア
+        for i in reversed(range(self.tag_layout.count())):
+            widget = self.tag_layout.itemAt(i).widget()
+            if widget:
+                widget.deleteLater()
+        
+        # データベースから全タグを取得
+        try:
+            cursor = self.db_manager.conn.cursor()
+            cursor.execute("""
+                SELECT tag, COUNT(DISTINCT file_path) as count 
+                FROM file_tags 
+                GROUP BY tag 
+                ORDER BY count DESC, tag
+            """)
+            
+            self.tag_checkboxes = {}
+            for tag, count in cursor.fetchall():
+                checkbox = QCheckBox(f"{tag} ({count})")
+                checkbox.setTristate(True)
+                checkbox.tag_name = tag  # タグ名を保存
+                checkbox.stateChanged.connect(self._on_filter_changed)
+                self.tag_checkboxes[tag] = checkbox
+                self.tag_layout.addWidget(checkbox)
+            
+            self.tag_layout.addStretch()
+            
+        except Exception as e:
+            print(f"タグリストの更新エラー: {e}")
+
+    def get_current_filters(self):
+        """現在のフィルター設定を取得"""
+        file_types = set()
+        for type_id, cb in self.file_type_checkboxes.items():
+            if cb.isChecked():
+                file_types.add(type_id)
+        
+        include_tags = set()
+        exclude_tags = set()
+        for tag, cb in self.tag_checkboxes.items():
+            if cb.checkState() == Qt.Checked:
+                include_tags.add(tag)
+            elif cb.checkState() == Qt.Unchecked:
+                exclude_tags.add(tag)
+        
+        return {
+            'file_types': file_types,
+            'include_tags': include_tags,
+            'exclude_tags': exclude_tags
+        }
+
+    def _on_filter_changed(self):
+        """フィルター条件が変更されたときの処理"""
+        self.filter_changed.emit()
+
+    def _filter_tag_list(self, search_text):
+        """タグリストを検索テキストでフィルタリング"""
+        search_text = search_text.lower()
+        for tag, checkbox in self.tag_checkboxes.items():
+            checkbox.setVisible(search_text in tag.lower())
+
+    def _select_all_tags(self):
+        """すべてのタグを選択"""
+        for checkbox in self.tag_checkboxes.values():
+            if checkbox.isVisible():
+                checkbox.setCheckState(Qt.Checked)
+
+    def _clear_all_tags(self):
+        """すべてのタグの選択を解除"""
+        for checkbox in self.tag_checkboxes.values():
+            if checkbox.isVisible():
+                checkbox.setCheckState(Qt.PartiallyChecked)
+
+    def _clear_all_filters(self):
+        """すべてのフィルターをクリア"""
+        # ファイル種別フィルターをクリア
+        for checkbox in self.file_type_checkboxes.values():
+            checkbox.setChecked(False)
+        
+        # タグフィルターをクリア
+        for checkbox in self.tag_checkboxes.values():
+            checkbox.setCheckState(Qt.PartiallyChecked)
+        
+        self.filter_changed.emit()
+
 
 # --- 4. メインアプリケーションウィンドウ ---
 class ImageFeatureViewerApp(QMainWindow):
@@ -1055,6 +1385,101 @@ class ImageFeatureViewerApp(QMainWindow):
         self.thread_pool.setMaxThreadCount(os.cpu_count() * 2 or 2) # スレッド数を調整
 
     def _init_ui(self):
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QHBoxLayout(central_widget)  # 垂直から水平レイアウトに変更
+
+        # サイドパネルの追加
+        self.filter_panel = FilterSidePanel(self, self.db_manager)
+        self.filter_panel.filter_changed.connect(self._apply_current_filters)
+        self.filter_panel.setMaximumWidth(300)  # パネルの最大幅を設定
+        main_layout.addWidget(self.filter_panel)
+
+        # メインコンテンツ領域
+        content_layout = QVBoxLayout()
+        
+        # 検索コントロール
+        search_layout = QHBoxLayout()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("検索キーワードを入力...")
+        self.search_input.returnPressed.connect(self._perform_search)
+        self.search_button = QPushButton("検索")
+        self.search_button.clicked.connect(self._perform_search)
+        
+        # 全画像表示ボタンを追加
+        self.show_all_button = QPushButton("全画像表示")
+        self.show_all_button.clicked.connect(self._display_all_images_from_db)
+        self.show_all_button.setEnabled(False)
+        
+        self.acquire_features_button = QPushButton("特徴量を取得")
+        self.acquire_features_button.clicked.connect(self._acquire_missing_features)
+        self.acquire_features_button.setEnabled(False)
+        
+        search_layout.addWidget(self.search_input)
+        search_layout.addWidget(self.search_button)
+        search_layout.addWidget(self.show_all_button)
+        search_layout.addWidget(self.acquire_features_button)
+        
+        # サムネイルサイズコントロール
+        search_layout.addStretch(1)
+        search_layout.addWidget(QLabel("サムネイルサイズ:"))
+        
+        self.thumbnail_size_combo = QComboBox()
+        self.thumbnail_size_combo.addItem("非表示", 0)
+        self.thumbnail_size_combo.addItem("50px", 50)
+        self.thumbnail_size_combo.addItem("100px", 100)
+        self.thumbnail_size_combo.addItem("200px", 200)
+        self.thumbnail_size_combo.addItem("300px", 300)
+        self.thumbnail_size_combo.addItem("400px", 400)
+        
+        # 現在のサムネイルサイズに基づいて選択を設定
+        if self.thumbnail_size == 0:
+            self.thumbnail_size_combo.setCurrentIndex(0)
+        elif self.thumbnail_size <= 50:
+            self.thumbnail_size_combo.setCurrentIndex(1)
+        elif self.thumbnail_size <= 100:
+            self.thumbnail_size_combo.setCurrentIndex(2)
+        elif self.thumbnail_size <= 200:
+            self.thumbnail_size_combo.setCurrentIndex(3)
+        elif self.thumbnail_size <= 300:
+            self.thumbnail_size_combo.setCurrentIndex(4)
+        else:
+            self.thumbnail_size_combo.setCurrentIndex(5)
+        
+        self.thumbnail_size_combo.currentIndexChanged.connect(self._on_thumbnail_size_changed)
+        search_layout.addWidget(self.thumbnail_size_combo)
+        
+        content_layout.addLayout(search_layout)
+
+        # テーブルビュー
+        self.model = ImageTableModel(self, initial_thumbnail_size=self.thumbnail_size)
+        self.table_view = QTableView()
+        self.table_view.setModel(self.model)
+        self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table_view.doubleClicked.connect(self._open_file_on_double_click)
+
+        header = self.table_view.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        self.table_view.setColumnWidth(0, self.thumbnail_size)
+        self.table_view.verticalHeader().setDefaultSectionSize(self.thumbnail_size + 5)
+
+        content_layout.addWidget(self.table_view)
+        
+        # メインコンテンツをメインレイアウトに追加
+        main_layout.addLayout(content_layout)
+        main_layout.setStretch(1, 1)  # メインコンテンツ領域を広げる
+
+        # ステータスバー
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.status_bar.showMessage("準備完了。DBファイルを開いてください。")
+
+    def _init_ui2(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
@@ -1136,6 +1561,79 @@ class ImageFeatureViewerApp(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("準備完了。DBファイルを開いてください。")
+
+    def _apply_current_filters(self):
+        """サイドパネルの現在のフィルター設定を適用"""
+        if not self.db_manager:
+            return
+
+        try:
+            self.status_bar.showMessage("フィルターを適用中...")
+
+            # フィルター設定を取得
+            filters = self.filter_panel.get_current_filters()
+            
+            # 全ファイル情報を取得
+            all_files = self.db_manager.get_all_file_metadata()
+            if not all_files:
+                return
+
+            filtered_files = []
+            for file_info in all_files:
+                file_path = file_info.get('file_path', '')
+                
+                # ファイル種別フィルター
+                if filters['file_types']:
+                    include_by_type = False
+                    for file_type in filters['file_types']:
+                        if (file_type == 'image' and FileTypeValidator.is_image_file(file_path)) or \
+                        (file_type == 'video' and FileTypeValidator.is_video_file(file_path)) or \
+                        (file_type == 'thumbnail' and FileTypeValidator.supports_thumbnail(file_path)) or \
+                        (file_type == 'clip' and FileTypeValidator.supports_clip_features(file_path)):
+                            include_by_type = True
+                            break
+                    if not include_by_type:
+                        continue
+
+                # タグ情報を取得
+                try:
+                    file_tags = set(self.db_manager.get_file_tags(file_path))
+                except Exception:
+                    file_tags = set()
+                file_info['tags'] = file_tags
+
+                # タグフィルター
+                if filters['include_tags'] and not filters['include_tags'].issubset(file_tags):
+                    continue
+                if filters['exclude_tags'] and filters['exclude_tags'].intersection(file_tags):
+                    continue
+
+                file_info['score'] = None
+                filtered_files.append(file_info)
+
+            # 表示件数制限を適用
+            display_files = filtered_files[:self.top_n_display_count]
+            
+            # モデルを更新
+            self.model.set_data(display_files, len(filtered_files))
+
+            # フィルター情報を作成
+            filter_info = []
+            if filters['file_types']:
+                filter_info.append(f"ファイル種別: {len(filters['file_types'])}種")
+            if filters['include_tags']:
+                filter_info.append(f"含むタグ: {len(filters['include_tags'])}個")
+            if filters['exclude_tags']:
+                filter_info.append(f"除外タグ: {len(filters['exclude_tags'])}個")
+
+            status = f"フィルター適用: {', '.join(filter_info) if filter_info else '未設定'}"
+            status += f" - {len(display_files)}/{len(filtered_files)} 件表示"
+            self.status_bar.showMessage(status)
+
+        except Exception as e:
+            error_msg = f"フィルター適用中にエラーが発生しました: {e}"
+            print(error_msg, file=sys.stderr)
+            self.status_bar.showMessage(error_msg)
 
     def _init_menu(self):
         menubar = self.menuBar()
@@ -1277,6 +1775,11 @@ class ImageFeatureViewerApp(QMainWindow):
             self.db_path = db_path
             # メインスレッド用のDBManagerインスタンス
             self.db_manager = DBManager(self.db_path) 
+
+            # サイドパネルのデータベース参照を更新
+            self.filter_panel.db_manager = self.db_manager
+            self.filter_panel.update_tag_list()
+
             if self.clip_feature_extractor is None:
                 # プログレスダイアログの表示... Not working
                 progress_dialog = QProgressDialog(
