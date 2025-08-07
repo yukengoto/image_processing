@@ -713,11 +713,8 @@ class TagSelectionDialog(QDialog):
             self.checkbox_layout.addWidget(error_label, 0, 0, 1, 2)
     
     def _on_tag_checkbox_changed(self, state, tag):
-        """チェックボックスの状態変更時の処理"""
-        if state == Qt.CheckState.Checked.value:
-            self.selected_existing_tags.add(tag)
-        else:
-            self.selected_existing_tags.discard(tag)
+        # 3状態: チェック(選択), 未チェック(除外), 中間(無視)
+        pass  # 状態はget_selected_tagsで取得するのでここでは何もしない
     
     def _select_all_tags(self):
         """すべてのタグを選択"""
@@ -730,17 +727,27 @@ class TagSelectionDialog(QDialog):
             checkbox.setChecked(False)
     
     def get_selected_tags(self):
-        """選択されたタグを取得"""
-        all_tags = set(self.selected_existing_tags)
-        
-        # 新規タグがあれば追加
+        """3状態チェックボックスの状態を返す
+        戻り値: (include_tags, exclude_tags)
+        include_tags: Qt.Checked(選択)のタグ集合
+        exclude_tags: Qt.Unchecked(除外)のタグ集合
+        """
+        include_tags = set()
+        exclude_tags = set()
+        for tag, checkbox in self.tag_checkboxes.items():
+            state = checkbox.checkState()
+            if state == Qt.Checked:
+                include_tags.add(tag)
+            elif state == Qt.Unchecked:
+                exclude_tags.add(tag)
+            # Qt.PartiallyCheckedは無視
+        # 新規タグ(追加時のみ)
         if self.allow_new_tags and hasattr(self, 'new_tags_input'):
             new_tags_text = self.new_tags_input.text().strip()
             if new_tags_text:
-                new_tags = [tag.strip() for tag in new_tags_text.split(',') if tag.strip()]
-                all_tags.update(new_tags)
-        
-        return all_tags
+                for tag in [t.strip() for t in new_tags_text.split(',') if t.strip()]:
+                    include_tags.add(tag)
+        return include_tags, exclude_tags
 
 # image_feature_manager.py への追加コード
 # ファイル種別フィルター機能の実装
@@ -1517,59 +1524,50 @@ class ImageFeatureViewerApp(QMainWindow):
                 QMessageBox.warning(self, "警告", "タグの追加に失敗しました。")
 
     def _filter_files_by_tags(self):
-        """タグによるファイルフィルタリング（改良版）"""
+        """タグによるファイルフィルタリング（3状態対応版）"""
         if not self.db_manager:
             QMessageBox.warning(self, "エラー", "DBが開かれていません。")
             return
-        
-        # タグ選択ダイアログを表示
         dialog = TagSelectionDialog(
             parent=self,
             db_manager=self.db_manager,
             title="タグでフィルタリング",
-            allow_new_tags=False  # フィルターでは新規タグは不要
+            allow_new_tags=False
         )
-        
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            selected_tags = list(dialog.get_selected_tags())
-            
-            #if not selected_tags:
-            #    QMessageBox.information(self, "情報", "タグが選択されていません。")
-            #    return
-            
+            include_tags, exclude_tags = dialog.get_selected_tags()
             try:
-                # 「すべてのタグを含む」でフィルター
-                file_paths = self.db_manager.search_files_by_tags(selected_tags, match_all=True)
-                
+                # まずinclude_tagsでフィルタ
+                if include_tags:
+                    file_paths = self.db_manager.search_files_by_tags(list(include_tags), match_all=True)
+                else:
+                    # タグ指定なしなら全ファイル
+                    file_paths = [f['file_path'] for f in self.db_manager.get_all_file_metadata()]
+                # 除外タグでさらにフィルタ
+                if exclude_tags:
+                    filtered_paths = []
+                    for file_path in file_paths:
+                        tags = set(self.db_manager.get_file_tags(file_path))
+                        if not tags.intersection(exclude_tags):
+                            filtered_paths.append(file_path)
+                    file_paths = filtered_paths
                 if not file_paths:
-                    # 「いずれかのタグを含む」でも試行
-                    reply = QMessageBox.question(
-                        self, 
-                        "検索結果", 
-                        f"選択したすべてのタグを持つファイルは見つかりませんでした。\n"
-                        f"いずれかのタグを持つファイルを検索しますか？",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                    )
-                    
-                    if reply == QMessageBox.StandardButton.Yes:
-                        file_paths = self.db_manager.search_files_by_tags(selected_tags, match_all=False)
-                    
-                    if not file_paths:
-                        QMessageBox.information(self, "検索結果", "指定されたタグを持つファイルは見つかりませんでした。")
-                        return
-                
-                # 検索結果のファイル情報を取得
+                    QMessageBox.information(self, "検索結果", "指定された条件に合致するファイルは見つかりませんでした。")
+                    return
                 results = []
                 for file_path in file_paths:
                     file_info = self.db_manager.load_file_info(file_path)
                     if file_info:
                         file_info['score'] = None
                         results.append(file_info)
-                
                 self.model.set_data(results[:self.top_n_display_count], len(results))
-                tag_names = ', '.join(selected_tags)
-                self.status_bar.showMessage(f"タグフィルター完了。「{tag_names}」で {len(results)} 件のファイルが見つかりました。")
-                
+                msg = f"タグフィルター完了。"
+                if include_tags:
+                    msg += f"選択: {', '.join(include_tags)} "
+                if exclude_tags:
+                    msg += f"除外: {', '.join(exclude_tags)} "
+                msg += f"{len(results)} 件のファイルが見つかりました。"
+                self.status_bar.showMessage(msg)
             except Exception as e:
                 QMessageBox.critical(self, "タグフィルターエラー", f"タグフィルター中にエラーが発生しました:\n{e}")
     # === 使用方法 ===
