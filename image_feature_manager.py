@@ -6,14 +6,6 @@ import numpy as np
 import mimetypes
 from pathlib import Path
 
-# === 適用方法 ===
-# 1. FileTypeValidator クラスを追加
-# 2. ThumbnailGenerator を SafeThumbnailGenerator に置換
-# 3. FeatureExtractor を SafeFeatureExtractor に置換  
-# 4. ImageTableModel.data メソッドを safe_data に置換
-# 5. ImageAdder.run メソッドを safe_image_adder_run に置換
-# 6. インポート文に mimetypes, pathlib.Path を追加
-
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QTableView, QLineEdit, QHeaderView,
