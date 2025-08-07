@@ -5,6 +5,7 @@ import sqlite3
 import numpy as np
 import mimetypes
 from pathlib import Path
+from PIL import Image, ExifTags  # PILライブラリを追加
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -16,20 +17,23 @@ from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, Qt, QSize,
     QThreadPool, QRunnable, Signal, QObject, QUrl
 )
-from PySide6.QtGui import QPixmap, QDesktopServices
+from PySide6.QtGui import QPixmap, QDesktopServices, QImage
 
 # --- 新しいモジュールのインポート ---
 from db_manager import DBManager, blob_to_numpy, numpy_to_blob
 from clip_feature_extractor import CLIPFeatureExtractor
 
 # --- 1. サムネイル生成をバックグラウンドで行うためのQRunnableとシグナルエミッター ---
-class ThumbnailSignalEmitter(QObject):
+class ThumbnailSignalEmitter2(QObject):
     """QRunnableからQAbstractTableModelにシグナルを送るためのヘルパークラス"""
     thumbnail_ready = Signal(QModelIndex, QPixmap)
     error = Signal(str)
+class ThumbnailSignalEmitter(QObject):
+    """QRunnableからQAbstractTableModelにシグナルを送るためのヘルパークラス"""
+    thumbnail_ready = Signal(QModelIndex, QPixmap, bool)  # bool: is_preview
+    error = Signal(str)
 
 # image_feature_manager.py の安全性向上のための修正
-
 # === ファイル形式チェック用のユーティリティクラス ===
 class FileTypeValidator:
     """ファイル形式の検証とカテゴリ分類を行うクラス"""
@@ -108,7 +112,109 @@ class FileTypeValidator:
 #class SafeThumbnailGenerator(QRunnable):
 class ThumbnailGenerator(QRunnable):
     """安全性を向上させたサムネイル生成タスク"""
-    
+    #class ThumbnailGenerator(QRunnable):
+    def _load_and_rotate_image(self, image_path, is_preview=True):
+        """EXIFの回転情報とサムネイルを考慮して画像を読み込む"""
+        try:
+            with Image.open(image_path) as img:
+                # プレビュー用の場合は埋め込みサムネイルを試す
+                if is_preview:
+                    try:
+                        if hasattr(img, '_getexif') and img._getexif():
+                            exif = dict(img._getexif().items())
+                            if 0x0201 in exif:  # JPEGInterchangeFormat
+                                jpeg_start = exif[0x0201]
+                                if 0x0202 in exif:  # JPEGInterchangeFormatLength
+                                    jpeg_length = exif[0x0202]
+                                    with open(image_path, 'rb') as f:
+                                        f.seek(jpeg_start)
+                                        thumbnail_data = f.read(jpeg_length)
+                                        if thumbnail_data:
+                                            try:
+                                                thumbnail_img = Image.open(io.BytesIO(thumbnail_data))
+                                                if thumbnail_img.mode != 'RGB':
+                                                    thumbnail_img = thumbnail_img.convert('RGB')
+                                                thumb_data = thumbnail_img.tobytes('raw', 'RGB')
+                                                qimg = QImage(thumb_data, thumbnail_img.width, thumbnail_img.height, 
+                                                            thumbnail_img.width * 3, QImage.Format.Format_RGB888)
+                                                return QPixmap.fromImage(qimg)
+                                            except:
+                                                pass
+                    except:
+                        pass
+
+                # プレビュー用の場合は高速化のために小さいサイズで読み込む
+                if is_preview:
+                    # 元画像の1/4サイズで読み込む
+                    img.thumbnail((img.width // 4, img.height // 4))
+
+                # 回転情報の取得と適用
+                try:
+                    for orientation in ExifTags.TAGS.keys():
+                        if ExifTags.TAGS[orientation] == 'Orientation':
+                            break
+                    if hasattr(img, '_getexif') and img._getexif():
+                        exif = dict(img._getexif().items())
+                        if orientation in exif:
+                            if exif[orientation] == 2:
+                                img = img.transpose(Image.FLIP_LEFT_RIGHT)
+                            elif exif[orientation] == 3:
+                                img = img.transpose(Image.ROTATE_180)
+                            elif exif[orientation] == 4:
+                                img = img.transpose(Image.FLIP_TOP_BOTTOM)
+                            elif exif[orientation] == 5:
+                                img = img.transpose(Image.FLIP_LEFT_RIGHT).transpose(Image.ROTATE_90)
+                            elif exif[orientation] == 6:
+                                img = img.transpose(Image.ROTATE_270)
+                            elif exif[orientation] == 7:
+                                img = img.transpose(Image.FLIP_LEFT_RIGHT).transpose(Image.ROTATE_270)
+                            elif exif[orientation] == 8:
+                                img = img.transpose(Image.ROTATE_90)
+                except:
+                    pass
+
+                img_data = img.convert('RGB').tobytes('raw', 'RGB')
+                qimg = QImage(img_data, img.width, img.height, img.width * 3, QImage.Format.Format_RGB888)
+                return QPixmap.fromImage(qimg)
+
+        except Exception as e:
+            print(f"画像の読み込み処理エラー ({os.path.basename(image_path)}): {e}")
+            return QPixmap(image_path)
+
+    def run(self):
+        try:
+            # ファイルの事前検証
+            is_valid, error_msg = FileTypeValidator.validate_file_integrity(self.image_path)
+            if not is_valid:
+                self.signal_emitter.error.emit(f"ファイル検証エラー ({os.path.basename(self.image_path)}): {error_msg}")
+                return
+
+            # プレビュー用の低画質サムネイルを生成
+            preview_pixmap = self._load_and_rotate_image(self.image_path, is_preview=True)
+            if not preview_pixmap.isNull():
+                preview_thumb = preview_pixmap.scaled(
+                    self.size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.FastTransformation  # 高速な変換を使用
+                )
+                self.signal_emitter.thumbnail_ready.emit(self.index, preview_thumb, True)
+
+            # 高画質版のサムネイルを生成
+            original_pixmap = self._load_and_rotate_image(self.image_path, is_preview=False)
+            if not original_pixmap.isNull():
+                final_thumb = original_pixmap.scaled(
+                    self.size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                self.signal_emitter.thumbnail_ready.emit(self.index, final_thumb, False)
+
+        except Exception as e:
+            error_msg = f"サムネイル生成中の予期せぬエラー ({os.path.basename(self.image_path)}): {e}"
+            print(error_msg, file=sys.stderr)
+            self.signal_emitter.error.emit(error_msg)
+
+
     def __init__(self, image_path, size: QSize, index, signal_emitter):
         super().__init__()
         self.image_path = image_path
@@ -116,7 +222,101 @@ class ThumbnailGenerator(QRunnable):
         self.index = index
         self.signal_emitter = signal_emitter
 
-    def run(self):
+    def _load_and_rotate_image2(self, image_path):
+        """EXIFの回転情報を考慮して画像を読み込む"""
+        try:
+            # PILで画像を開く
+            with Image.open(image_path) as img:
+                # EXIFデータを取得
+                try:
+                    for orientation in ExifTags.TAGS.keys():
+                        if ExifTags.TAGS[orientation] == 'Orientation':
+                            break
+                    exif = dict(img._getexif().items())
+                    
+                    # 回転情報に基づいて画像を回転
+                    if orientation in exif:
+                        if exif[orientation] == 2:
+                            img = img.transpose(Image.FLIP_LEFT_RIGHT)
+                        elif exif[orientation] == 3:
+                            img = img.transpose(Image.ROTATE_180)
+                        elif exif[orientation] == 4:
+                            img = img.transpose(Image.FLIP_TOP_BOTTOM)
+                        elif exif[orientation] == 5:
+                            img = img.transpose(Image.FLIP_LEFT_RIGHT).transpose(Image.ROTATE_90)
+                        elif exif[orientation] == 6:
+                            img = img.transpose(Image.ROTATE_270)
+                        elif exif[orientation] == 7:
+                            img = img.transpose(Image.FLIP_LEFT_RIGHT).transpose(Image.ROTATE_270)
+                        elif exif[orientation] == 8:
+                            img = img.transpose(Image.ROTATE_90)
+                except (KeyError, AttributeError):
+                    # EXIFデータがない場合は回転せずそのまま
+                    pass
+
+                # PILイメージをQPixmapに変換
+                img_data = img.convert('RGB').tobytes('raw', 'RGB')
+                qimg = QImage(img_data, img.width, img.height, img.width * 3, QImage.Format.Format_RGB888)
+                return QPixmap.fromImage(qimg)
+
+        except Exception as e:
+            print(f"画像の回転処理エラー ({os.path.basename(image_path)}): {e}")
+            # エラーの場合は通常の方法で読み込み
+            return QPixmap(image_path)
+
+    def run3(self):
+        try:
+            # ファイルの事前検証
+            is_valid, error_msg = FileTypeValidator.validate_file_integrity(self.image_path)
+            if not is_valid:
+                self.signal_emitter.error.emit(f"ファイル検証エラー ({os.path.basename(self.image_path)}): {error_msg}")
+                return
+            
+            # サムネイル対応チェック
+            if not FileTypeValidator.supports_thumbnail(self.image_path):
+                return
+            
+            # ファイルサイズチェック
+            try:
+                file_size = os.path.getsize(self.image_path)
+                if file_size > 50 * 1024 * 1024:  # 50MB制限
+                    self.signal_emitter.error.emit(f"ファイルサイズが大きすぎます ({os.path.basename(self.image_path)}): {file_size / (1024*1024):.1f}MB")
+                    return
+            except OSError as e:
+                self.signal_emitter.error.emit(f"ファイルサイズ取得エラー ({os.path.basename(self.image_path)}): {e}")
+                return
+
+            # EXIFの回転情報を考慮して画像を読み込む
+            original_pixmap = self._load_and_rotate_image(self.image_path)
+            
+            if original_pixmap.isNull():
+                self.signal_emitter.error.emit(f"画像読み込み失敗 ({os.path.basename(self.image_path)})")
+                return
+
+            # 異常に大きな画像のチェック
+            if original_pixmap.width() > 10000 or original_pixmap.height() > 10000:
+                self.signal_emitter.error.emit(f"画像サイズが大きすぎます ({os.path.basename(self.image_path)}): {original_pixmap.width()}x{original_pixmap.height()}")
+                return
+
+            # サムネイル生成
+            pixmap = original_pixmap.scaled(
+                self.size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            
+            if pixmap.isNull():
+                self.signal_emitter.error.emit(f"サムネイル生成失敗 ({os.path.basename(self.image_path)})")
+                return
+
+            self.signal_emitter.thumbnail_ready.emit(self.index, pixmap)
+            
+        except Exception as e:
+            error_msg = f"サムネイル生成中の予期せぬエラー ({os.path.basename(self.image_path)}): {e}"
+            print(error_msg, file=sys.stderr)
+            self.signal_emitter.error.emit(error_msg)
+
+    def run2(self):
         try:
             # ファイルの事前検証
             is_valid, error_msg = FileTypeValidator.validate_file_integrity(self.image_path)
@@ -491,7 +691,19 @@ class ImageTableModel(QAbstractTableModel):
             return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         return None
 
-    def update_thumbnail(self, index: QModelIndex, pixmap: QPixmap):
+    def update_thumbnail(self, index: QModelIndex, pixmap: QPixmap, is_preview: bool):
+        """サムネイルを更新（プレビュー/高画質の区別あり）"""
+        file_path = self._data[index.row()].get('file_path')
+        current_pixmap = self.thumbnail_cache.get(file_path)
+        
+        # プレビューの場合、既に高画質版があれば更新しない
+        if is_preview and current_pixmap is not None:
+            return
+            
+        self.thumbnail_cache[file_path] = pixmap
+        self.dataChanged.emit(index, index, [Qt.ItemDataRole.DecorationRole])
+
+    def update_thumbnail2(self, index: QModelIndex, pixmap: QPixmap):
         file_path = self._data[index.row()].get('file_path')
         self.thumbnail_cache[file_path] = pixmap
         self.dataChanged.emit(index, index, [Qt.ItemDataRole.DecorationRole])
