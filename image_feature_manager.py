@@ -177,44 +177,6 @@ class ThumbnailGenerator(QRunnable):
             print(error_msg, file=sys.stderr)
             self.signal_emitter.error.emit(error_msg)
 
-
-class ThumbnailGenerator2(QRunnable):
-    """画像を読み込み、サムネイルを生成するタスク (ディスクキャッシュなし)"""
-    def __init__(self, image_path, size: QSize, index, signal_emitter):
-        super().__init__()
-        self.image_path = image_path
-        self.size = size
-        self.index = index
-        self.signal_emitter = signal_emitter
-
-    def run(self):
-        try:
-            if not os.path.exists(self.image_path):
-                error_msg = f"ERROR: サムネイル生成を試みましたが、ファイルが見つかりません: {self.image_path}"
-                print(error_msg, file=sys.stderr)
-                self.signal_emitter.error.emit(f"ファイルが見つかりません: {os.path.basename(self.image_path)}")
-                return
-
-            original_pixmap = QPixmap(self.image_path)
-            
-            if original_pixmap.isNull():
-                raise ValueError(f"画像をロードできませんでした (QPixmap.isNull()): {self.image_path}")
-
-            pixmap = original_pixmap.scaled(
-                self.size,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            
-            if pixmap.isNull():
-                raise ValueError(f"QPixmapのリサイズに失敗しました: {self.image_path}")
-
-            self.signal_emitter.thumbnail_ready.emit(self.index, pixmap)
-        except Exception as e:
-            error_msg = f"ERROR: サムネイル生成中に予期せぬエラーが発生しました ({self.image_path}): {e}"
-            print(error_msg, file=sys.stderr)
-            self.signal_emitter.error.emit(f"サムネイル生成エラー ({os.path.basename(self.image_path)}): {e}")
-
 # --- 全画像データロード用のQRunnableとシグナルエミッター ---
 class AllImagesLoadSignalEmitter(QObject):
     """全画像データのロードタスクからメインスレッドにシグナルを送るためのヘルパークラス"""
@@ -303,71 +265,6 @@ class AllImagesLoader(QRunnable):
             print(error_msg, file=sys.stderr)
             import traceback
             traceback.print_exc()  # デバッグ用：スタックトレースを出力
-            self.signal_emitter.error.emit(error_msg)
-        finally:
-            if self.db_manager:
-                self.db_manager.close()
-
-    def run2(self):
-        try:
-            self.db_manager = DBManager(self.db_path)
-            
-            # 全画像のメタデータを取得
-            self.signal_emitter.progress_update.emit(0, 0, "画像データを読み込み中...")
-            all_db_data = self.db_manager.get_all_file_metadata()
-            total_count = len(all_db_data)
-            
-            if total_count == 0:
-                self.signal_emitter.finished.emit([], 0)
-                return
-            
-            # 各ファイルのタグ情報を取得（バッチ処理で効率化）
-            self.signal_emitter.progress_update.emit(0, total_count, "タグ情報を読み込み中...")
-            
-            # タグ情報を一括取得するためのSQL
-            cursor = self.db_manager.conn.cursor()
-            file_paths = [item['file_path'] for item in all_db_data]
-            
-            # IN句を使って一括でタグを取得
-            placeholders = ','.join('?' * len(file_paths))
-            cursor.execute(f"""
-                SELECT file_path, tag FROM file_tags 
-                WHERE file_path IN ({placeholders})
-                ORDER BY file_path, tag
-            """, file_paths)
-            
-            # タグ情報を辞書にまとめる
-            tags_dict = {}
-            for row in cursor.fetchall():
-                file_path = row[0]
-                tag = row[1]
-                if file_path not in tags_dict:
-                    tags_dict[file_path] = set()
-                tags_dict[file_path].add(tag)
-            
-            # 各アイテムにタグ情報とスコア（None）を追加
-            for i, item in enumerate(all_db_data):
-                item['score'] = None  # 検索ではないのでスコアはNone
-                file_path = item.get('file_path')
-                item['tags'] = tags_dict.get(file_path, set())
-                
-                # 進捗更新（100件ごと）
-                if (i + 1) % 100 == 0 or (i + 1) == total_count:
-                    self.signal_emitter.progress_update.emit(
-                        i + 1, total_count, f"データ整理中: {i + 1}/{total_count}"
-                    )
-            
-            # 表示件数制限があれば適用
-            if self.max_display_count and self.max_display_count < len(all_db_data):
-                display_data = all_db_data[:self.max_display_count]
-            else:
-                display_data = all_db_data
-            
-            self.signal_emitter.finished.emit(display_data, total_count)
-            
-        except Exception as e:
-            error_msg = f"全画像データの読み込み中にエラーが発生しました: {e}"
-            print(error_msg, file=sys.stderr)
             self.signal_emitter.error.emit(error_msg)
         finally:
             if self.db_manager:
@@ -487,96 +384,6 @@ class FeatureExtractor(QRunnable):
             if self.db_manager:
                 self.db_manager.close()
 
-
-class FeatureExtractor2(QRunnable):
-    """画像ファイルの特徴量を抽出するタスク"""
-    def __init__(self, db_path: str, files_without_features: list, signal_emitter: FeatureExtractionSignalEmitter):
-        super().__init__()
-        self.db_path = db_path
-        self.files_without_features = files_without_features
-        self.signal_emitter = signal_emitter
-        self.db_manager = None
-        self.clip_feature_extractor = None
-
-    def run(self):
-        try:
-            self.db_manager = DBManager(self.db_path)
-            self.clip_feature_extractor = CLIPFeatureExtractor()
-            
-            total_files = len(self.files_without_features)
-            
-            if total_files == 0:
-                self.signal_emitter.finished.emit(0)
-                return
-
-            # 特徴量抽出の進捗を手動で追跡
-            self.signal_emitter.progress_update.emit(0, total_files, "CLIP特徴量の抽出中...")
-            
-            # 1つずつ処理して進捗を更新
-            extracted_features = []
-            processed_indices = []
-            
-            for i, file_path in enumerate(self.files_without_features):
-                try:
-                    # 個別に特徴量を抽出
-                    features, indices = self.clip_feature_extractor.extract_features_from_paths([file_path])
-                    if len(features) > 0:
-                        extracted_features.append(features[0])
-                        processed_indices.append(i)
-                    
-                    # 進捗を更新
-                    self.signal_emitter.progress_update.emit(
-                        i + 1, 
-                        total_files, 
-                        f"特徴量抽出中: {os.path.basename(file_path)}"
-                    )
-                except Exception as e:
-                    error_msg = f"特徴量抽出エラー ({os.path.basename(file_path)}): {e}"
-                    print(error_msg, file=sys.stderr)
-                    self.signal_emitter.error.emit(error_msg)
-                    continue
-            
-            if len(extracted_features) == 0:
-                self.signal_emitter.finished.emit(0)
-                return
-
-            # データベース更新フェーズ
-            self.signal_emitter.progress_update.emit(0, len(extracted_features), "データベースを更新中...")
-            
-            updated_count = 0
-            for i, (feature, original_index) in enumerate(zip(extracted_features, processed_indices)):
-                file_path = self.files_without_features[original_index]
-                feature_blob = numpy_to_blob(feature)
-                
-                try:
-                    # C++互換のDBManagerメソッドを使用
-                    self.db_manager.insert_or_update_file_metadata(
-                        file_path=file_path,
-                        clip_feature_blob=feature_blob
-                    )
-                    updated_count += 1
-                    
-                    # DB更新の進捗を更新
-                    self.signal_emitter.progress_update.emit(
-                        i + 1, 
-                        len(extracted_features), 
-                        f"DB更新中: {os.path.basename(file_path)}"
-                    )
-                except Exception as e:
-                    error_msg = f"特徴量更新エラー ({os.path.basename(file_path)}): {e}"
-                    print(error_msg, file=sys.stderr)
-                    self.signal_emitter.error.emit(error_msg)
-            
-            self.signal_emitter.finished.emit(updated_count)
-            
-        except Exception as e:
-            error_msg = f"特徴量抽出処理中にエラーが発生しました: {e}"
-            print(error_msg, file=sys.stderr)
-            self.signal_emitter.error.emit(error_msg)
-        finally:
-            if self.db_manager:
-                self.db_manager.close()
-
 # --- 2. データベースのデータと連携するカスタムテーブルモデル ---
 class ImageTableModel(QAbstractTableModel):
     def __init__(self, parent=None, initial_thumbnail_size=100):
@@ -685,67 +492,6 @@ class ImageTableModel(QAbstractTableModel):
 
         return None
 
-    # ImageTableModel.data() メソッドの修正
-    def data2(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
-        if not index.isValid():
-            return None
-
-        row = index.row()
-        col = index.column()
-        item_data = self._data[row]
-
-        if role == Qt.ItemDataRole.DisplayRole:
-            if col == 0:
-                return ""
-            elif col == 1:
-                return os.path.basename(item_data.get('file_path', ''))
-            elif col == 2:
-                score = item_data.get('score')
-                return f"{score:.4f}" if score is not None else ""
-            elif col == 3:
-                # タグの表示を修正
-                tags = item_data.get('tags', None)
-                if tags is None:
-                    return ""
-                elif isinstance(tags, set):
-                    return ', '.join(sorted(tags)) if tags else ""
-                elif isinstance(tags, list):
-                    return ', '.join(sorted(tags)) if tags else ""
-                elif isinstance(tags, str):
-                    return tags
-                else:
-                    # デバッグ用：タグの型を確認
-                    print(f"DEBUG: Unexpected tags type for {item_data.get('file_path', 'unknown')}: {type(tags)} = {tags}")
-                    return str(tags) if tags else ""
-            elif col == 4:
-                return item_data.get('file_path', '')
-
-        elif role == Qt.ItemDataRole.DecorationRole and col == 0:
-            # サムネイルサイズが0の場合は何も返さない
-            if self.thumbnail_size.width() == 0:
-                return None
-                
-            file_path = item_data.get('file_path')
-            if file_path in self.thumbnail_cache:
-                return self.thumbnail_cache[file_path]
-            else:
-                if file_path and os.path.exists(file_path):
-                    generator = ThumbnailGenerator(
-                        image_path=file_path,
-                        size=self.thumbnail_size, # Use current thumbnail size
-                        index=index,
-                        signal_emitter=self.thumbnail_signal_emitter
-                    )
-                    self.thread_pool.start(generator)
-                return QPixmap()
-        
-        elif role == Qt.ItemDataRole.TextAlignmentRole:
-            if col == 0:
-                return Qt.AlignmentFlag.AlignCenter
-            return Qt.AlignmentFlag.AlignLeft
-
-        return None
-
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
         if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
             return self._headers[section]
@@ -782,51 +528,6 @@ class ImageAdder(QRunnable):
         self.image_paths = image_paths
         self.signal_emitter = signal_emitter
         self.db_manager = None # 各スレッドで個別にインスタンス化
-
-    def run2(self):
-        added_count = 0
-        total_files = len(self.image_paths)
-        self.signal_emitter.progress_update.emit(f"データベースに {total_files} 個の画像を追加中...")
-
-        try:
-            self.db_manager = DBManager(self.db_path) # スレッド内でDBManagerをインスタンス化
-            
-            for i, file_path in enumerate(self.image_paths):
-                if not os.path.exists(file_path):
-                    self.signal_emitter.progress_update.emit(f"警告: ファイルが見つかりません。スキップします: {file_path}")
-                    continue
-                
-                try:
-                    # ファイルのメタデータを取得
-                    stat_info = os.stat(file_path)
-                    file_size = stat_info.st_size
-                    creation_time = str(stat_info.st_ctime)  # C++側はstring形式
-                    last_modified_time = str(stat_info.st_mtime)
-
-                    # C++互換のDBManagerメソッドを使用
-                    self.db_manager.insert_or_update_file_metadata(
-                        file_path=file_path,
-                        file_size=file_size,
-                        time_created=creation_time,
-                        time_modified=last_modified_time,
-                        clip_feature_blob=None  # 特徴量は後で追加
-                    )
-                    added_count += 1
-                    self.signal_emitter.progress_update.emit(f"追加中: {added_count}/{total_files} ({os.path.basename(file_path)})")
-                except Exception as e:
-                    error_msg = f"ERROR: ファイル '{file_path}' の追加中にエラーが発生しました: {e}"
-                    print(error_msg, file=sys.stderr)
-                    self.signal_emitter.error.emit(f"ファイル追加エラー ({os.path.basename(file_path)}): {e}")
-            
-            self.signal_emitter.finished.emit(added_count)
-        except Exception as e:
-            # DBManagerインスタンス化またはループ中の致命的なエラー
-            error_msg = f"データベース処理の初期化または実行中にエラーが発生しました: {e}"
-            print(error_msg, file=sys.stderr)
-            self.signal_emitter.error.emit(error_msg)
-        finally:
-            if self.db_manager:
-                self.db_manager.close() # 処理終了時に接続を閉じる
 
     # === ImageAdder の修正 ===
     def run(self):
@@ -1552,7 +1253,7 @@ class ImageFeatureViewerApp(QMainWindow):
             # メインスレッド用のDBManagerインスタンス
             self.db_manager = DBManager(self.db_path) 
             if self.clip_feature_extractor is None:
-                # プログレスダイアログの表示
+                # プログレスダイアログの表示... Not working
                 progress_dialog = QProgressDialog(
                     "CLIPモデルをロード中です...", 
                     "キャンセル", 0, 0, self
@@ -1703,66 +1404,6 @@ class ImageFeatureViewerApp(QMainWindow):
             import traceback
             traceback.print_exc()  # デバッグ用
 
-    def _perform_search2(self):
-        if not self.db_manager:
-            self.status_bar.showMessage("エラー: DBが選択されていません。")
-            return
-
-        query_text = self.search_input.text().strip()
-        if not query_text:
-            self.status_bar.showMessage("検索キーワードを入力してください。")
-            return
-
-        try:
-            self.status_bar.showMessage("検索中...")
-            
-            if self.clip_feature_extractor is None:
-                QMessageBox.critical(self, "エラー", "CLIPモデルが初期化されていません。アプリケーションを再起動してください。")
-                return
-
-            search_feature = self.clip_feature_extractor.extract_features_from_text(query_text)
-            if np.linalg.norm(search_feature) > 0:
-                search_feature = search_feature / np.linalg.norm(search_feature)
-            else:
-                self.status_bar.showMessage("検索キーワードの特徴量が無効です。")
-                return
-
-            results = []
-            all_db_data = self.db_manager.get_all_file_metadata()
-
-            for item in all_db_data:
-                file_path = item.get('file_path')
-                clip_feature_blob = item.get('clip_feature_blob')
-
-                if clip_feature_blob:
-                    image_feature = blob_to_numpy(clip_feature_blob)
-                    if image_feature is not None:
-                        if np.linalg.norm(image_feature) > 0:
-                            image_feature = image_feature / np.linalg.norm(image_feature)
-                            similarity = np.dot(search_feature, image_feature.T)
-                            
-                            item['score'] = float(similarity)
-                            # タグ情報を取得して追加
-                            tags = self.db_manager.get_file_tags(file_path)
-                            item['tags'] = set(tags) if tags else set()
-                            results.append(item)
-
-            total_image_count = len(all_db_data)
-            
-            filtered_results = [r for r in results if r['score'] >= self.similarity_threshold]
-            sorted_results = sorted(filtered_results, key=lambda x: x['score'], reverse=True)
-            display_data = sorted_results[:self.top_n_display_count]
-            
-            self.model.set_data(display_data, total_image_count)
-            self.status_bar.showMessage(f"検索完了。上位 {len(display_data)} 件を表示中。({total_image_count} 件中)")
-
-        except sqlite3.Error as e:
-            self.status_bar.showMessage(f"検索中のデータベースエラー: {e}")
-            QMessageBox.critical(self, "データベースエラー", f"検索中にデータベースエラーが発生しました:\n{e}")
-        except Exception as e:
-            self.status_bar.showMessage(f"検索中にエラーが発生しました: {e}")
-            QMessageBox.critical(self, "検索エラー", f"検索中に予期せぬエラーが発生しました:\n{e}")
-
     def _acquire_missing_features(self):
         if not self.db_manager or not self.clip_feature_extractor:
             self.status_bar.showMessage("エラー: DBが選択されていないか、CLIPモデルが初期化されていません。")
@@ -1900,9 +1541,9 @@ class ImageFeatureViewerApp(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             selected_tags = list(dialog.get_selected_tags())
             
-            if not selected_tags:
-                QMessageBox.information(self, "情報", "タグが選択されていません。")
-                return
+            #if not selected_tags:
+            #    QMessageBox.information(self, "情報", "タグが選択されていません。")
+            #    return
             
             try:
                 # 「すべてのタグを含む」でフィルター
@@ -1947,82 +1588,6 @@ class ImageFeatureViewerApp(QMainWindow):
     # 2. _add_tags_to_selected_files メソッドを置換
     # 3. _filter_files_by_tags メソッドを置換
     # 4. インポート文に QDialog, QCheckBox, QScrollArea, QGridLayout, QGroupBox を追加
-
-
-    def _add_tags_to_selected_files2(self):
-        if not self.db_manager:
-            QMessageBox.warning(self, "エラー", "DBが開かれていません。")
-            return
-        
-        selected_indexes = self.table_view.selectionModel().selectedRows()
-        if not selected_indexes:
-            QMessageBox.information(self, "情報", "タグを追加するファイルを選択してください。")
-            return
-
-        tags_text, ok = QInputDialog.getText(self, "タグの追加", "追加するタグをカンマ区切りで入力してください:")
-        
-        if ok and tags_text:
-            new_tags = [tag.strip() for tag in tags_text.split(',') if tag.strip()]
-            if not new_tags:
-                QMessageBox.warning(self, "警告", "有効なタグが入力されませんでした。")
-                return
-
-            updated_count = 0
-            for index in selected_indexes:
-                row_data = self.model.get_row_data(index.row())
-                if row_data and 'file_path' in row_data:
-                    file_path = row_data['file_path']
-                    
-                    try:
-                        for tag in new_tags:
-                            self.db_manager.add_tag_to_file(file_path, tag)
-                        updated_count += 1
-                    except Exception as e:
-                        print(f"タグ更新エラー ({file_path}): {e}")
-                        self.status_bar.showMessage(f"タグ更新エラー ({os.path.basename(file_path)}): {e}")
-
-            if updated_count > 0:
-                QMessageBox.information(self, "完了", f"{updated_count} 個のファイルにタグを追加しました。")
-                # 表示を再読み込み
-                self._display_all_images_from_db_async()
-            else:
-                QMessageBox.warning(self, "警告", "タグの追加に失敗したファイルがあります。")
-
-    def _filter_files_by_tags2(self):
-        if not self.db_manager:
-            QMessageBox.warning(self, "エラー", "DBが開かれていません。")
-            return
-        
-        tags_text, ok = QInputDialog.getText(self, "タグフィルター", 
-                                           "フィルター用のタグをカンマ区切りで入力してください:\n"
-                                           "（全て含むファイルを検索します）")
-        
-        if ok and tags_text:
-            tags = [tag.strip() for tag in tags_text.split(',') if tag.strip()]
-            if not tags:
-                QMessageBox.warning(self, "警告", "有効なタグが入力されませんでした。")
-                return
-            
-            try:
-                file_paths = self.db_manager.search_files_by_tags(tags, match_all=True)
-                
-                if not file_paths:
-                    QMessageBox.information(self, "検索結果", "指定されたタグを持つファイルは見つかりませんでした。")
-                    return
-                
-                # 検索結果のファイル情報を取得
-                results = []
-                for file_path in file_paths:
-                    file_info = self.db_manager.load_file_info(file_path)
-                    if file_info:
-                        file_info['score'] = None
-                        results.append(file_info)
-                
-                self.model.set_data(results[:self.top_n_display_count], len(results))
-                self.status_bar.showMessage(f"タグフィルター完了。{len(results)} 件のファイルが見つかりました。")
-                
-            except Exception as e:
-                QMessageBox.critical(self, "タグフィルターエラー", f"タグフィルター中にエラーが発生しました:\n{e}")
 
     def _open_file_on_double_click(self, index: QModelIndex):
         if index.isValid():
