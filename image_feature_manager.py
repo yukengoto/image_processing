@@ -614,12 +614,13 @@ class TagSelectionDialog(QDialog):
         checkbox.setCheckState(Qt.PartiallyChecked)
         def on_click():
             state = checkbox.checkState()
-            if state == Qt.Checked:
-                checkbox.setCheckState(Qt.Unchecked)
-            elif state == Qt.Unchecked:
+            if state == Qt.Unchecked:
+                checkbox.setCheckState(Qt.Checked)
+            elif state == Qt.Checked:
                 checkbox.setCheckState(Qt.PartiallyChecked)
             else:
-                checkbox.setCheckState(Qt.Checked)
+                checkbox.setCheckState(Qt.Unchecked)
+
         checkbox.clicked.connect(on_click)
         return checkbox
 
@@ -1221,6 +1222,16 @@ class FilterSidePanel(QWidget):
         self.tag_layout = QVBoxLayout(self.tag_widget)
         self.tag_list.setWidget(self.tag_widget)
         self.tag_list.setMinimumHeight(300)
+
+        # チェックボックスのスタイルを設定
+        checkbox_style = """
+            QCheckBox::indicator:indeterminate {
+                background-color: #ffcccc;
+                border: 2px solid #ff0000;
+            }
+        """
+        self.tag_widget.setStyleSheet(checkbox_style)
+
         tag_layout.addWidget(self.tag_list)
         
         # タグ選択ボタン
@@ -1289,7 +1300,7 @@ class FilterSidePanel(QWidget):
         for tag, cb in self.tag_checkboxes.items():
             if cb.checkState() == Qt.Checked:
                 include_tags.add(tag)
-            elif cb.checkState() == Qt.Unchecked:
+            elif cb.checkState() == Qt.PartiallyChecked: # Hide if intermediate state
                 exclude_tags.add(tag)
         
         return {
@@ -1328,7 +1339,7 @@ class FilterSidePanel(QWidget):
         
         # タグフィルターをクリア
         for checkbox in self.tag_checkboxes.values():
-            checkbox.setCheckState(Qt.PartiallyChecked)
+            checkbox.setCheckState(Qt.Unchecked)
         
         self.filter_changed.emit()
 
