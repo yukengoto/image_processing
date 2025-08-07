@@ -464,6 +464,10 @@ class ImageViewModel(QAbstractTableModel):
             return None
 
         if role == Qt.ItemDataRole.DecorationRole:
+            # サムネイルは最初の列のみに表示
+            if index.column() != 0:
+                return None
+                
             # サムネイルの表示
             file_path = self._data[index.row()].get('file_path', '')
             if not file_path:
@@ -486,24 +490,19 @@ class ImageViewModel(QAbstractTableModel):
 
         elif role == Qt.ItemDataRole.DisplayRole:
             row = index.row()
-            if self.view_mode == ViewMode.ICON:
-                # アイコンビューモードではファイル名のみ表示
+            col = index.column()
+            if col == 0:
+                return ""  # サムネイル列は空文字列
+            elif col == 1:
                 return os.path.basename(self._data[row].get('file_path', ''))
-            else:
-                # テーブルビューモードでは列に応じた情報を表示
-                col = index.column()
-                if col == 0:
-                    return ""
-                elif col == 1:
-                    return os.path.basename(self._data[row].get('file_path', ''))
-                elif col == 2:
-                    score = self._data[row].get('score')
-                    return f"{score:.4f}" if score is not None else ""
-                elif col == 3:
-                    tags = self._data[row].get('tags', set())
-                    return ', '.join(sorted(tags)) if tags else ""
-                elif col == 4:
-                    return self._data[row].get('file_path', '')
+            elif col == 2:
+                score = self._data[row].get('score')
+                return f"{score:.4f}" if score is not None else ""
+            elif col == 3:
+                tags = self._data[row].get('tags', set())
+                return ', '.join(sorted(tags)) if tags else ""
+            elif col == 4:
+                return self._data[row].get('file_path', '')
 
         elif role == Qt.ItemDataRole.ToolTipRole:
             file_info = self._data[index.row()]
@@ -1518,24 +1517,9 @@ class ImageFeatureViewerApp(QMainWindow):
         
         content_layout.addLayout(search_layout)
 
-        # テーブルビュー
-        self.model = ImageViewModel(self, initial_thumbnail_size=self.thumbnail_size)
-        self.table_view = QTableView()
-        self.table_view.setModel(self.model)
-        self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table_view.doubleClicked.connect(self._open_file_on_double_click)
 
-        header = self.table_view.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        self.table_view.setColumnWidth(0, self.thumbnail_size)
-        self.table_view.verticalHeader().setDefaultSectionSize(self.thumbnail_size + 5)
 
-        content_layout.addWidget(self.table_view)
+        #content_layout.addWidget(self.table_view)
         
         # メインコンテンツをメインレイアウトに追加
         main_layout.addLayout(content_layout)
@@ -1566,9 +1550,21 @@ class ImageFeatureViewerApp(QMainWindow):
 
         # スタックウィジェットでビューを切り替え
         self.view_stack = QStackedWidget()
-        
+
         # テーブルビュー
         self.table_view = QTableView()
+        self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table_view.doubleClicked.connect(self._open_file_on_double_click)
+
+        header = self.table_view.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        self.table_view.setColumnWidth(0, self.thumbnail_size)
+        self.table_view.verticalHeader().setDefaultSectionSize(self.thumbnail_size + 5)
         self.view_stack.addWidget(self.table_view)
         
         # リストビュー
@@ -1865,6 +1861,41 @@ class ImageFeatureViewerApp(QMainWindow):
             self.file_type_filter_action.setEnabled(True)
 
     def _on_thumbnail_size_changed(self, index=None):
+        """サムネイルサイズのコンボボックスが変更されたときのハンドラ"""
+        new_size = self.thumbnail_size_combo.currentData()
+        
+        if new_size != self.thumbnail_size:
+            self.thumbnail_size = new_size
+            
+            if self.thumbnail_size == 0:
+                # 非表示の場合
+                self.status_bar.showMessage("サムネイルを非表示に設定しました。")
+                self.table_view.setColumnWidth(0, 0)  # サムネイル列を非表示
+                self.table_view.setColumnHidden(0, True)  # 列を完全に隠す
+                self.table_view.verticalHeader().setDefaultSectionSize(25)  # 行の高さを最小に
+            else:
+                # サイズ指定の場合
+                self.status_bar.showMessage(f"サムネイルサイズを {self.thumbnail_size}px に設定しました。")
+                self.table_view.setColumnHidden(0, False)  # 列を表示
+                self.table_view.setColumnWidth(0, self.thumbnail_size)
+                self.table_view.verticalHeader().setDefaultSectionSize(self.thumbnail_size + 5)
+                
+                # リストビューのアイコンとグリッドサイズを更新
+                icon_size = QSize(self.thumbnail_size, self.thumbnail_size)
+                self.list_view.setIconSize(icon_size)
+                
+                # グリッドサイズを計算（アイコンサイズに余白を加算）
+                grid_width = self.thumbnail_size + 60  # テキスト用の余白
+                grid_height = self.thumbnail_size + 40  # ラベル用の余白
+                self.list_view.setGridSize(QSize(grid_width, grid_height))
+                
+                # リストビューの更新を強制
+                self.list_view.reset()
+
+            # モデルにサイズ変更を通知
+            self.model.set_current_thumbnail_size(self.thumbnail_size)
+
+    def _on_thumbnail_size_changed2(self, index=None):
         """サムネイルサイズのコンボボックスが変更されたときのハンドラ"""
         new_size = self.thumbnail_size_combo.currentData()
         
@@ -2443,3 +2474,10 @@ if __name__ == "__main__":
     window = ImageFeatureViewerApp()
     window.show()
     sys.exit(app.exec())
+
+
+
+
+
+
+    
