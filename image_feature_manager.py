@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QTableView, QLineEdit, QHeaderView,
     QStatusBar, QAbstractItemView, QMessageBox, QInputDialog, QMenu,
-    QLabel, QComboBox, QProgressDialog
+    QLabel, QComboBox, QProgressDialog, QListView, QStackedWidget, QStyle
 )
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, Qt, QSize,
@@ -576,10 +576,19 @@ class FeatureExtractor(QRunnable):
             if self.db_manager:
                 self.db_manager.close()
 
+# ビュー切り替えの列挙型を追加
+from enum import Enum
+
+class ViewMode(Enum):
+    TABLE = 0
+    ICON = 1
+
 # --- 2. データベースのデータと連携するカスタムテーブルモデル ---
-class ImageTableModel(QAbstractTableModel):
+class ImageViewModel2(QAbstractTableModel):  # 既存の ImageTableModel を置き換え
+#class ImageTableModel(QAbstractTableModel): # NOT USED ANYMORE?
     def __init__(self, parent=None, initial_thumbnail_size=100):
         super().__init__(parent)
+        self.view_mode = ViewMode.TABLE
         self._data = []
         self._total_image_count = 0
         self._headers = ["", "ファイル名", "類似度", "タグ", "パス"] 
@@ -604,6 +613,13 @@ class ImageTableModel(QAbstractTableModel):
         return len(self._data)
 
     def columnCount(self, parent=QModelIndex()):
+        # アイコンビューモードの場合は1列
+        if self.view_mode == ViewMode.ICON:
+            return 1
+        # テーブルビューモードの場合は通常通り
+        return len(self._headers)
+
+    def columnCount2(self, parent=QModelIndex()):
         return len(self._headers)
 
     def set_current_thumbnail_size(self, size_int: int):
@@ -614,8 +630,200 @@ class ImageTableModel(QAbstractTableModel):
             # Notify view to redraw decorations (thumbnails)
             self.dataChanged.emit(self.index(0, 0), self.index(self.rowCount() - 1, self.columnCount() - 1), [Qt.ItemDataRole.DecorationRole])
 
-    # === ImageTableModel の修正 ===
+    def set_view_mode(self, mode: ViewMode):
+        self.view_mode = mode
+        self.layoutChanged.emit()
+
+class ImageViewModel(QAbstractTableModel):
+    def __init__(self, parent=None, initial_thumbnail_size=100):
+        super().__init__(parent)
+        self.view_mode = ViewMode.TABLE
+        self._data = []
+        self._total_image_count = 0
+        self._headers = ["", "ファイル名", "類似度", "タグ", "パス"]
+        self.thumbnail_cache = {}
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(os.cpu_count() or 1)
+        
+        self.thumbnail_signal_emitter = ThumbnailSignalEmitter()
+        self.thumbnail_signal_emitter.thumbnail_ready.connect(self.update_thumbnail)
+        self.thumbnail_signal_emitter.error.connect(self.parent().statusBar().showMessage)
+        
+        self.thumbnail_size = QSize(initial_thumbnail_size, initial_thumbnail_size)
+
+    def rowCount(self, parent=QModelIndex()):
+        return len(self._data)
+
+    def columnCount(self, parent=QModelIndex()):
+        # アイコンビューモードの場合は1列
+        if self.view_mode == ViewMode.ICON:
+            return 1
+        # テーブルビューモードの場合は通常通り
+        return len(self._headers)
+
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+
+        if role == Qt.ItemDataRole.DecorationRole:
+            # サムネイルの表示
+            file_path = self._data[index.row()].get('file_path', '')
+            if not file_path:
+                return QPixmap()
+
+            # キャッシュにあればそれを返す
+            if file_path in self.thumbnail_cache:
+                return self.thumbnail_cache[file_path]
+            
+            # サムネイル生成をリクエスト
+            if FileTypeValidator.supports_thumbnail(file_path):
+                generator = ThumbnailGenerator(
+                    image_path=file_path,
+                    size=self.thumbnail_size,
+                    index=index,
+                    signal_emitter=self.thumbnail_signal_emitter
+                )
+                self.thread_pool.start(generator)
+            return QPixmap()
+
+        elif role == Qt.ItemDataRole.DisplayRole:
+            row = index.row()
+            if self.view_mode == ViewMode.ICON:
+                # アイコンビューモードではファイル名のみ表示
+                return os.path.basename(self._data[row].get('file_path', ''))
+            else:
+                # テーブルビューモードでは列に応じた情報を表示
+                col = index.column()
+                if col == 0:
+                    return ""
+                elif col == 1:
+                    return os.path.basename(self._data[row].get('file_path', ''))
+                elif col == 2:
+                    score = self._data[row].get('score')
+                    return f"{score:.4f}" if score is not None else ""
+                elif col == 3:
+                    tags = self._data[row].get('tags', set())
+                    return ', '.join(sorted(tags)) if tags else ""
+                elif col == 4:
+                    return self._data[row].get('file_path', '')
+
+        elif role == Qt.ItemDataRole.ToolTipRole:
+            file_info = self._data[index.row()]
+            tags = ', '.join(sorted(file_info.get('tags', set())))
+            return f"ファイル名: {os.path.basename(file_info.get('file_path', ''))}\nタグ: {tags}"
+
+        return None
+
+    def data4(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+
+        if self.view_mode == ViewMode.TABLE:
+            # テーブルビュー用のデータ表示ロジック
+            row = index.row()
+            col = index.column()
+            
+            if row >= len(self._data):
+                return None
+                
+            item_data = self._data[row]
+
+            if role == Qt.ItemDataRole.DisplayRole:
+                if col == 0:
+                    return ""
+                elif col == 1:
+                    return os.path.basename(item_data.get('file_path', ''))
+                elif col == 2:
+                    score = item_data.get('score')
+                    return f"{score:.4f}" if score is not None else ""
+                elif col == 3:
+                    tags = item_data.get('tags', set())
+                    return ', '.join(sorted(tags)) if tags else ""
+                elif col == 4:
+                    return item_data.get('file_path', '')
+
+            elif role == Qt.ItemDataRole.DecorationRole and col == 0:
+                file_path = item_data.get('file_path', '')
+                return self.thumbnail_cache.get(file_path, QPixmap())
+
+        else:
+            # アイコンビュー用のデータ表示ロジック
+            if role == Qt.ItemDataRole.DecorationRole:
+                file_path = self._data[index.row()].get('file_path', '')
+                return self.thumbnail_cache.get(file_path, QPixmap())
+            elif role == Qt.ItemDataRole.DisplayRole:
+                return os.path.basename(self._data[index.row()].get('file_path', ''))
+            elif role == Qt.ItemDataRole.ToolTipRole:
+                file_info = self._data[index.row()]
+                tags = ', '.join(sorted(file_info.get('tags', set())))
+                return f"ファイル名: {os.path.basename(file_info.get('file_path', ''))}\nタグ: {tags}"
+
+        return None
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
+        if self.view_mode == ViewMode.ICON:
+            return None
+        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
+            return self._headers[section]
+        return None
+
+    def set_data(self, data, total_count):
+        self.beginResetModel()
+        self._data = data
+        self._total_image_count = total_count
+        self.thumbnail_cache.clear()
+        self.endResetModel()
+
+    def set_current_thumbnail_size(self, size_int: int):
+        new_size = QSize(size_int, size_int) if size_int > 0 else QSize(0, 0)
+        if self.thumbnail_size != new_size:
+            self.thumbnail_size = new_size
+            self.thumbnail_cache.clear()
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(self.rowCount() - 1, 0),
+                [Qt.ItemDataRole.DecorationRole]
+            )
+
+    def set_view_mode(self, mode: ViewMode):
+        self.view_mode = mode
+        self.layoutChanged.emit()
+
+    def update_thumbnail(self, index: QModelIndex, pixmap: QPixmap, is_preview: bool):
+        file_path = self._data[index.row()].get('file_path')
+        current_pixmap = self.thumbnail_cache.get(file_path)
+        
+        if is_preview and current_pixmap is not None:
+            return
+            
+        self.thumbnail_cache[file_path] = pixmap
+        self.dataChanged.emit(index, index, [Qt.ItemDataRole.DecorationRole])
+
+    def data3(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+
+        if self.view_mode == ViewMode.TABLE:
+            # 既存のテーブルビュー用のデータ表示ロジック
+            return super().data(index, role)
+        else:
+            # アイコンビュー用のデータ表示ロジック
+            if role == Qt.ItemDataRole.DecorationRole:
+                # サムネイル画像を返す
+                file_path = self._data[index.row()].get('file_path', '')
+                return self.thumbnail_cache.get(file_path, QPixmap())
+            elif role == Qt.ItemDataRole.DisplayRole:
+                # ファイル名を返す
+                return os.path.basename(self._data[index.row()].get('file_path', ''))
+            elif role == Qt.ItemDataRole.ToolTipRole:
+                # ツールチップ用の詳細情報
+                file_info = self._data[index.row()]
+                tags = ', '.join(sorted(file_info.get('tags', set())))
+                return f"ファイル名: {os.path.basename(file_info.get('file_path', ''))}\nタグ: {tags}"
+
+
+    # === ImageTableModel の修正 ===
+    def data2(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
     # def safe_data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         """安全性を向上させたdataメソッド"""
         if not index.isValid():
@@ -684,14 +892,14 @@ class ImageTableModel(QAbstractTableModel):
 
         return None
 
-    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
+    def headerData2(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
         if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
             return self._headers[section]
         elif role == Qt.ItemDataRole.TextAlignmentRole:
             return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         return None
 
-    def update_thumbnail(self, index: QModelIndex, pixmap: QPixmap, is_preview: bool):
+    def update_thumbnail3(self, index: QModelIndex, pixmap: QPixmap, is_preview: bool):
         """サムネイルを更新（プレビュー/高画質の区別あり）"""
         file_path = self._data[index.row()].get('file_path')
         current_pixmap = self.thumbnail_cache.get(file_path)
@@ -1607,6 +1815,7 @@ class ImageFeatureViewerApp(QMainWindow):
         self.thread_pool = QThreadPool() # アプリケーション全体でスレッドプールを使用
         self.thread_pool.setMaxThreadCount(os.cpu_count() * 2 or 2) # スレッド数を調整
 
+    # ImageFeatureViewerApp クラスに追加するメソッドとUI要素
     def _init_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -1675,7 +1884,7 @@ class ImageFeatureViewerApp(QMainWindow):
         content_layout.addLayout(search_layout)
 
         # テーブルビュー
-        self.model = ImageTableModel(self, initial_thumbnail_size=self.thumbnail_size)
+        self.model = ImageViewModel(self, initial_thumbnail_size=self.thumbnail_size)
         self.table_view = QTableView()
         self.table_view.setModel(self.model)
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1701,6 +1910,58 @@ class ImageFeatureViewerApp(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("準備完了。DBファイルを開いてください。")
+
+        # ビュー切り替えボタンを追加
+        view_mode_layout = QHBoxLayout()
+        self.table_view_button = QPushButton()
+        self.table_view_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        self.table_view_button.setCheckable(True)
+        self.table_view_button.setChecked(True)
+        self.table_view_button.clicked.connect(lambda: self._switch_view_mode(ViewMode.TABLE))
+        
+        self.icon_view_button = QPushButton()
+        self.icon_view_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogListView))
+        self.icon_view_button.setCheckable(True)
+        self.icon_view_button.clicked.connect(lambda: self._switch_view_mode(ViewMode.ICON))
+        
+        view_mode_layout.addWidget(self.table_view_button)
+        view_mode_layout.addWidget(self.icon_view_button)
+        view_mode_layout.addStretch()
+        search_layout.addLayout(view_mode_layout)
+
+        # スタックウィジェットでビューを切り替え
+        self.view_stack = QStackedWidget()
+        
+        # テーブルビュー
+        self.table_view = QTableView()
+        self.view_stack.addWidget(self.table_view)
+        
+        # リストビュー
+        self.list_view = QListView()
+        self.list_view.setViewMode(QListView.ViewMode.IconMode)
+        self.list_view.setUniformItemSizes(True)
+        self.list_view.setSpacing(10)
+        self.list_view.setResizeMode(QListView.ResizeMode.Adjust)
+        self.list_view.setMovement(QListView.Movement.Static)
+        self.view_stack.addWidget(self.list_view)
+        
+        # 共通のモデルを設定
+        self.model = ImageViewModel(self, initial_thumbnail_size=self.thumbnail_size)
+        self.table_view.setModel(self.model)
+        self.list_view.setModel(self.model)
+
+        content_layout.addWidget(self.view_stack)
+
+    def _switch_view_mode(self, mode: ViewMode):
+        self.model.set_view_mode(mode)
+        self.table_view_button.setChecked(mode == ViewMode.TABLE)
+        self.icon_view_button.setChecked(mode == ViewMode.ICON)
+        self.view_stack.setCurrentIndex(mode.value)
+        
+        if mode == ViewMode.ICON:
+            # アイコンサイズを設定
+            self.list_view.setIconSize(QSize(self.thumbnail_size, self.thumbnail_size))
+            self.list_view.setGridSize(QSize(self.thumbnail_size + 30, self.thumbnail_size + 50))
 
     def _apply_current_filters(self):
         """サイドパネルの現在のフィルター設定を適用"""
