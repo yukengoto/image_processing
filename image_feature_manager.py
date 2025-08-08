@@ -183,7 +183,12 @@ class ThumbnailGenerator(QRunnable):
             # ファイルの事前検証
             is_valid, error_msg = FileTypeValidator.validate_file_integrity(self.image_path)
             if not is_valid:
-                self.signal_emitter.error.emit(f"ファイル検証エラー ({os.path.basename(self.image_path)}): {error_msg}")
+                # 安全なシグナル送信
+                try:
+                    if hasattr(self, 'signal_emitter') and self.signal_emitter:
+                        self.signal_emitter.error.emit(f"ファイル検証エラー ({os.path.basename(self.image_path)}): {error_msg}")
+                except RuntimeError:
+                    pass  # Signal source has been deleted
                 return
 
             # サムネイル生成（EXIFがあれば優先、なければ通常読み込み）
@@ -194,12 +199,24 @@ class ThumbnailGenerator(QRunnable):
                     Qt.AspectRatioMode.KeepAspectRatioByExpanding,  # 小さい画像も拡大
                     Qt.TransformationMode.SmoothTransformation  # 高品質変換
                 )
-                self.signal_emitter.thumbnail_ready.emit(self.index, thumb, False)
+                # 安全なシグナル送信
+                try:
+                    if hasattr(self, 'signal_emitter') and self.signal_emitter:
+                        self.signal_emitter.thumbnail_ready.emit(self.index, thumb, False)
+                except RuntimeError:
+                    # Signal source has been deleted の場合は無視
+                    pass
 
         except Exception as e:
             error_msg = f"サムネイル生成中の予期せぬエラー ({os.path.basename(self.image_path)}): {e}"
             print(error_msg, file=sys.stderr)
-            self.signal_emitter.error.emit(error_msg)
+            # シグナルエミッターが生きているかチェックしてから送信
+            try:
+                if hasattr(self, 'signal_emitter') and self.signal_emitter:
+                    self.signal_emitter.error.emit(error_msg)
+            except RuntimeError:
+                # Signal source has been deleted の場合は無視
+                pass
 
 
     def __init__(self, image_path, size: QSize, index, signal_emitter):
@@ -2491,6 +2508,20 @@ class ImageFeatureViewerApp(QMainWindow):
         self._display_all_images_from_db_async()
 
     def closeEvent(self, event):
+        """アプリケーション終了時の適切なクリーンアップ"""
+        # スレッドプールの安全な終了
+        if hasattr(self, 'model') and hasattr(self.model, 'thread_pool'):
+            self.model.thread_pool.clear()  # キューをクリア
+            self.model.thread_pool.waitForDone(3000)  # 最大3秒待機
+            
+        # シグナル接続をクリーンアップ
+        if hasattr(self, 'model') and hasattr(self.model, 'thumbnail_signal_emitter'):
+            try:
+                self.model.thumbnail_signal_emitter.thumbnail_ready.disconnect()
+                self.model.thumbnail_signal_emitter.error.disconnect()
+            except:
+                pass  # 既に切断済みの場合は無視
+        
         self._save_settings()
         if self.db_manager:
             self.db_manager.close()
