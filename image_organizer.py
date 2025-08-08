@@ -10,36 +10,12 @@ from collections import Counter # assign_fixed_size_labels で使用する場合
 # モジュールのインポート
 from clip_feature_extractor import CLIPFeatureExtractor
 from image_classification_engine import ImageClassifier
+from image_processing_utils import (
+    get_image_paths, remove_empty_dirs, ProgressDisplay, 
+    make_safe_filename, Constants
+)
 
-FEATURE_LOG_FILENAME = "image_features_log.npy" # 特徴量ログのファイル名もここに移動
-
-# --- ヘルパー関数 (既存のまま) ---
-def get_image_paths(img_dirs, recursive=False):
-    exts = ('.jpg', '.png', '.jpeg', '.gif', '.bmp', '.tiff', '.webp')
-    image_paths = []
-    for img_dir in img_dirs:
-        if not os.path.isdir(img_dir):
-            print(f"警告: ディレクトリ '{img_dir}' が見つかりません。スキップします。", file=sys.stderr)
-            continue
-        if recursive:
-            for root, _, files in os.walk(img_dir):
-                for file in files:
-                    if file.lower().endswith(exts):
-                        image_paths.append(os.path.join(root, file))
-        else:
-            for file in os.listdir(img_dir):
-                if file.lower().endswith(exts):
-                    image_paths.append(os.path.join(img_dir, file))
-    return image_paths
-
-def remove_empty_dirs(root_dir):
-    for current_dir, dirs, files in os.walk(root_dir, topdown=False):
-        if not dirs and not files:
-            try:
-                os.rmdir(current_dir)
-                print(f"空フォルダを削除: {current_dir}")
-            except OSError:
-                continue
+# --- ヘルパー関数はimage_processing_utils.pyに移動 ---
 
 # --- ImageSorter クラス (名称を ImageOrganizer に変更し、役割を縮小) ---
 # このクラスは主に画像のファイルシステム上の整理と、特徴量ログの管理を行う
@@ -68,7 +44,7 @@ class ImageOrganizer:
             display_name = cluster_names.get(label_key, "Unknown_Category_Fallback")
             
             # ファイルシステムで安全な名前に変換
-            safe_folder_name = display_name.replace(" ", "_").replace(":", "_").replace("/", "_").replace("\\", "_").replace("*", "_").replace("?", "_").replace('"', '_').replace("<", "_").replace(">", "_").replace("|", "_")
+            safe_folder_name = make_safe_filename(display_name)
             
             dest = os.path.join(output_dir, safe_folder_name)
             os.makedirs(dest, exist_ok=True)
@@ -99,12 +75,11 @@ class ImageOrganizer:
                     })
                 continue
             if (i + 1) % 10 == 0 or (i + 1) == total:
-                sys.stdout.write(f"\r分類中: {i + 1}/{total} ({(i + 1) / total * 100:.2f}%)")
-                sys.stdout.flush()
+                ProgressDisplay.show_progress(i + 1, total, "分類中", percentage=True)
         print(f"\n分類完了。{output_dir}/ フォルダ内を確認してください。")
         if feature_log_data:
-            np.save(FEATURE_LOG_FILENAME, np.array(feature_log_data, dtype=object))
-            print(f"特徴量データを '{FEATURE_LOG_FILENAME}' に保存しました。")
+            np.save(Constants.FEATURE_LOG_FILENAME, np.array(feature_log_data, dtype=object))
+            print(f"特徴量データを '{Constants.FEATURE_LOG_FILENAME}' に保存しました。")
         else:
             print("保存する特徴量データがありませんでした。")
 

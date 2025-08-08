@@ -4,6 +4,7 @@ import numpy as np
 import sys
 from PIL import Image
 from external_keywords import EXTERNAL_KEYWORDS  # 外部キーワード定義をインポート
+from image_processing_utils import ProgressDisplay
 
 # --- 1. グローバル設定とキーワード定義 ---
 # 将来的に外部ファイルから読み込むことを想定。
@@ -123,8 +124,7 @@ class CLIPFeatureExtractor:
                 processed_indices.append(i)
                 
                 if (i + 1) % 10 == 0 or (i + 1) == len(image_paths):
-                    sys.stdout.write(f"\r進捗 (特徴量抽出): {i + 1}/{len(image_paths)}")
-                    sys.stdout.flush()
+                    ProgressDisplay.show_progress(i + 1, len(image_paths), "特徴量抽出")
             except KeyboardInterrupt:
                 print("\n中断されました。")
                 raise
