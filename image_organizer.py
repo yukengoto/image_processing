@@ -11,7 +11,7 @@ from collections import Counter # assign_fixed_size_labels で使用する場合
 # 新しく作成したモジュールをインポート
 # ImageClassifierはclassify_image.pyからfeature_extractorを渡す前提
 from clip_feature_extractor import CLIPFeatureExtractor
-from image_classifier import ImageClassifier
+from image_classification_engine import ImageClassifier
 
 FEATURE_LOG_FILENAME = "image_features_log.npy" # 特徴量ログのファイル名もここに移動
 

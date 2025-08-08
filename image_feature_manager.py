@@ -1,5 +1,6 @@
 import sys
 import os
+import io
 import json
 import sqlite3
 import numpy as np
@@ -541,6 +542,26 @@ class ImageViewModel(QAbstractTableModel):
         self.layoutChanged.emit()
 
     def update_thumbnail(self, index: QModelIndex, pixmap: QPixmap, is_preview: bool):
+        """サムネイルを更新（プレビュー/高画質の区別あり）"""
+        if not index.isValid() or index.row() >= len(self._data):
+            return  # 無効なインデックスや範囲外の場合は何もしない
+            
+        file_path = self._data[index.row()].get('file_path')
+        if not file_path:
+            return  # ファイルパスが無効な場合は何もしない
+        
+        current_pixmap = self.thumbnail_cache.get(file_path)
+        
+        # プレビューの場合、既に高画質版があれば更新しない
+        if is_preview and current_pixmap is not None:
+            return
+            
+        self.thumbnail_cache[file_path] = pixmap
+        # インデックスが有効な場合のみ更新シグナルを発行
+        if index.isValid() and index.row() < len(self._data):
+            self.dataChanged.emit(index, index, [Qt.ItemDataRole.DecorationRole])
+
+    def update_thumbnail2(self, index: QModelIndex, pixmap: QPixmap, is_preview: bool):
         file_path = self._data[index.row()].get('file_path')
         current_pixmap = self.thumbnail_cache.get(file_path)
         
