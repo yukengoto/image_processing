@@ -242,7 +242,6 @@ class DBManager:
             cursor = self.conn.cursor()
             cursor.execute("SELECT tag FROM file_tags WHERE file_path = ?", (file_path,))
             tags = [row['tag'] for row in cursor.fetchall()]
-            print(f"DEBUG: get_file_tags({os.path.basename(file_path)}) = {tags}")  # デバッグ出力
             return tags
         except sqlite3.Error as e:
             print(f"タグ取得エラー ({file_path}): {e}", file=sys.stderr)

@@ -1,15 +1,13 @@
-# classify_image.py (修正後)
+# image_organizer.py
 
 import os
 import sys
 import argparse
 import numpy as np
 from collections import Counter # assign_fixed_size_labels で使用する場合
-# PIL は assign_fixed_size_labels でのみ必要になるので、その関数にのみインポートを限定する
-# from PIL import Image 
+ 
 
-# 新しく作成したモジュールをインポート
-# ImageClassifierはclassify_image.pyからfeature_extractorを渡す前提
+# モジュールのインポート
 from clip_feature_extractor import CLIPFeatureExtractor
 from image_classification_engine import ImageClassifier
 

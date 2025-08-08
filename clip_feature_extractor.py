@@ -4,7 +4,6 @@ import numpy as np
 import sys
 from PIL import Image
 from external_keywords import EXTERNAL_KEYWORDS  # 外部キーワード定義をインポート
-#import os
 
 # --- 1. グローバル設定とキーワード定義 ---
 # 将来的に外部ファイルから読み込むことを想定。
