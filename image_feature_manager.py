@@ -450,7 +450,8 @@ class ImageViewModel(QAbstractTableModel):
         self.thumbnail_cache = {}
         self.generating_thumbnails = set()  # 生成中のサムネイルを追跡
         self.thread_pool = QThreadPool()
-        self.thread_pool.setMaxThreadCount(os.cpu_count() or 1)
+        # サムネイル生成は2-3スレッドに制限（メモリとI/O負荷軽減）
+        self.thread_pool.setMaxThreadCount(min(3, os.cpu_count() or 1))
         
         self.thumbnail_signal_emitter = ThumbnailSignalEmitter()
         self.thumbnail_signal_emitter.thumbnail_ready.connect(self.update_thumbnail)
@@ -494,10 +495,16 @@ class ImageViewModel(QAbstractTableModel):
                     )
                 return cached_pixmap
             
-            # Lazy loading: サムネイル生成をリクエスト（重複防止）
-            # 実際に表示される場合のみ生成（dataメソッドが呼ばれた = 表示対象）
+            # デバッグ: 実際にどれだけの画像がリクエストされているかチェック
+            if len(self.generating_thumbnails) % 100 == 0:
+                print(f"DEBUG: 生成中のサムネイル数: {len(self.generating_thumbnails)}, アクティブスレッド: {self.thread_pool.activeThreadCount()}")
+            
+            # キュー制限付きLazy loading
+            MAX_CONCURRENT_THUMBNAILS = 50  # 同時生成制限
+            
             if (FileTypeValidator.supports_thumbnail(file_path) and 
-                file_path not in self.generating_thumbnails):
+                file_path not in self.generating_thumbnails and
+                len(self.generating_thumbnails) < MAX_CONCURRENT_THUMBNAILS):
                 
                 self.generating_thumbnails.add(file_path)
                 generator = ThumbnailGenerator(
