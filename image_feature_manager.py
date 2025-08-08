@@ -431,6 +431,7 @@ class ImageViewModel(QAbstractTableModel):
         self._total_image_count = 0
         self._headers = ["", "ファイル名", "類似度", "タグ", "パス"]
         self.thumbnail_cache = {}
+        self.generating_thumbnails = set()  # 生成中のサムネイルを追跡
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(os.cpu_count() or 1)
         
@@ -464,12 +465,24 @@ class ImageViewModel(QAbstractTableModel):
             if not file_path:
                 return QPixmap()
 
-            # キャッシュにあればそれを返す
+            # キャッシュにあればサイズ調整して返す
             if file_path in self.thumbnail_cache:
-                return self.thumbnail_cache[file_path]
+                cached_pixmap = self.thumbnail_cache[file_path]
+                if self.thumbnail_size.width() > 0:
+                    # 表示サイズに合わせて縮小（高品質）
+                    return cached_pixmap.scaled(
+                        self.thumbnail_size,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                return cached_pixmap
             
-            # サムネイル生成をリクエスト
-            if FileTypeValidator.supports_thumbnail(file_path):
+            # Lazy loading: サムネイル生成をリクエスト（重複防止）
+            # 実際に表示される場合のみ生成（dataメソッドが呼ばれた = 表示対象）
+            if (FileTypeValidator.supports_thumbnail(file_path) and 
+                file_path not in self.generating_thumbnails):
+                
+                self.generating_thumbnails.add(file_path)
                 generator = ThumbnailGenerator(
                     image_path=file_path,
                     size=QSize(400, 400),  # 固定400pxで生成、表示時にUI側で縮小
@@ -477,7 +490,7 @@ class ImageViewModel(QAbstractTableModel):
                     signal_emitter=self.thumbnail_signal_emitter
                 )
                 self.thread_pool.start(generator)
-            return QPixmap()
+            return QPixmap()  # 生成中は空のPixmapを返す
 
         elif role == Qt.ItemDataRole.DisplayRole:
             row = index.row()
@@ -514,6 +527,7 @@ class ImageViewModel(QAbstractTableModel):
         self._data = data
         self._total_image_count = total_count
         self.thumbnail_cache.clear()
+        self.generating_thumbnails.clear()  # 生成中セットもクリア
         self.endResetModel()
 
     def set_current_thumbnail_size(self, size_int: int):
@@ -539,6 +553,9 @@ class ImageViewModel(QAbstractTableModel):
         file_path = self._data[index.row()].get('file_path')
         if not file_path:
             return  # ファイルパスが無効な場合は何もしない
+        
+        # 生成完了したので生成中セットから削除
+        self.generating_thumbnails.discard(file_path)
         
         current_pixmap = self.thumbnail_cache.get(file_path)
         
