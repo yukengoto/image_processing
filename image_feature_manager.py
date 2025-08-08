@@ -1454,6 +1454,10 @@ class FilterSidePanel(QWidget):
 class ImageFeatureViewerApp(QMainWindow):
     SETTINGS_FILE = "image_feature_manager.config.json"
     SUPPORTED_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp')
+    
+    # アイコンビューのレイアウト定数
+    ICON_GRID_MARGIN_H = 15  # 横間隔（狭く設定）
+    ICON_GRID_MARGIN_V = 25  # 縦間隔（ファイル名表示用）
 
     def __init__(self):
         super().__init__()
@@ -1623,7 +1627,7 @@ class ImageFeatureViewerApp(QMainWindow):
         self.list_view = QListView()
         self.list_view.setViewMode(QListView.ViewMode.IconMode)
         self.list_view.setUniformItemSizes(True)
-        self.list_view.setSpacing(10)
+        self.list_view.setSpacing(5)  # より狭い間隔
         self.list_view.setResizeMode(QListView.ResizeMode.Adjust)
         self.list_view.setMovement(QListView.Movement.Static)
         self.view_stack.addWidget(self.list_view)
@@ -1644,7 +1648,11 @@ class ImageFeatureViewerApp(QMainWindow):
         if mode == ViewMode.ICON:
             # アイコンサイズを設定
             self.list_view.setIconSize(QSize(self.thumbnail_size, self.thumbnail_size))
-            self.list_view.setGridSize(QSize(self.thumbnail_size + 30, self.thumbnail_size + 50))
+            # 統一された狭い間隔でレイアウト
+            self.list_view.setGridSize(QSize(
+                self.thumbnail_size + self.ICON_GRID_MARGIN_H,
+                self.thumbnail_size + self.ICON_GRID_MARGIN_V
+            ))
 
     def _apply_current_filters(self):
         """サイドパネルの現在のフィルター設定を適用"""
@@ -1936,9 +1944,9 @@ class ImageFeatureViewerApp(QMainWindow):
                 icon_size = QSize(self.thumbnail_size, self.thumbnail_size)
                 self.list_view.setIconSize(icon_size)
                 
-                # グリッドサイズを計算（アイコンサイズに余白を加算）
-                grid_width = self.thumbnail_size + 60  # テキスト用の余白
-                grid_height = self.thumbnail_size + 40  # ラベル用の余白
+                # グリッドサイズを統一された定数で設定
+                grid_width = self.thumbnail_size + self.ICON_GRID_MARGIN_H
+                grid_height = self.thumbnail_size + self.ICON_GRID_MARGIN_V
                 self.list_view.setGridSize(QSize(grid_width, grid_height))
                 
                 # リストビューの更新を強制
