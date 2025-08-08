@@ -186,25 +186,15 @@ class ThumbnailGenerator(QRunnable):
                 self.signal_emitter.error.emit(f"ファイル検証エラー ({os.path.basename(self.image_path)}): {error_msg}")
                 return
 
-            # プレビュー用の低画質サムネイルを生成
-            preview_pixmap = self._load_and_rotate_image(self.image_path, is_preview=True)
-            if not preview_pixmap.isNull():
-                preview_thumb = preview_pixmap.scaled(
+            # サムネイル生成（EXIFがあれば優先、なければ通常読み込み）
+            pixmap = self._load_and_rotate_image(self.image_path, is_preview=True)
+            if not pixmap.isNull():
+                thumb = pixmap.scaled(
                     self.size,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.FastTransformation  # 高速な変換を使用
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,  # 小さい画像も拡大
+                    Qt.TransformationMode.SmoothTransformation  # 高品質変換
                 )
-                self.signal_emitter.thumbnail_ready.emit(self.index, preview_thumb, True)
-
-            # 高画質版のサムネイルを生成
-            original_pixmap = self._load_and_rotate_image(self.image_path, is_preview=False)
-            if not original_pixmap.isNull():
-                final_thumb = original_pixmap.scaled(
-                    self.size,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                self.signal_emitter.thumbnail_ready.emit(self.index, final_thumb, False)
+                self.signal_emitter.thumbnail_ready.emit(self.index, thumb, False)
 
         except Exception as e:
             error_msg = f"サムネイル生成中の予期せぬエラー ({os.path.basename(self.image_path)}): {e}"
@@ -482,7 +472,7 @@ class ImageViewModel(QAbstractTableModel):
             if FileTypeValidator.supports_thumbnail(file_path):
                 generator = ThumbnailGenerator(
                     image_path=file_path,
-                    size=self.thumbnail_size,
+                    size=QSize(400, 400),  # 固定400pxで生成、表示時にUI側で縮小
                     index=index,
                     signal_emitter=self.thumbnail_signal_emitter
                 )
@@ -530,7 +520,7 @@ class ImageViewModel(QAbstractTableModel):
         new_size = QSize(size_int, size_int) if size_int > 0 else QSize(0, 0)
         if self.thumbnail_size != new_size:
             self.thumbnail_size = new_size
-            self.thumbnail_cache.clear()
+            # キャッシュはクリアしない - 同じサムネイル画像を表示サイズだけ変更
             self.dataChanged.emit(
                 self.index(0, 0),
                 self.index(self.rowCount() - 1, 0),
