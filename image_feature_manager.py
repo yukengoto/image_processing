@@ -12,11 +12,11 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QTableView, QLineEdit, QHeaderView,
     QStatusBar, QAbstractItemView, QMessageBox, QInputDialog, QMenu,
-    QLabel, QComboBox, QProgressDialog, QListView, QStackedWidget, QStyle
+    QLabel, QComboBox, QProgressDialog, QListView, QStackedWidget, QStyle    
 )
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, Qt, QSize,
-    QThreadPool, QRunnable, Signal, QObject, QUrl
+    QThreadPool, QRunnable, Signal, QObject, QUrl, QSortFilterProxyModel
 )
 from PySide6.QtGui import QPixmap, QDesktopServices, QImage
 
@@ -439,6 +439,61 @@ from enum import Enum
 class ViewMode(Enum):
     TABLE = 0
     ICON = 1
+
+class ListProxyModel(QSortFilterProxyModel):
+    """リストビュー用のプロキシモデル - テーブルモデルを1列のリストとして表示"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+    
+    def columnCount(self, parent=QModelIndex()):
+        """リストビューでは常に1列"""
+        return 1
+    
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+            
+        # ソースモデルの対応するインデックスを取得
+        source_index = self.mapToSource(index)
+        if not source_index.isValid():
+            return None
+            
+        # 元モデルの最初の列（サムネイル列）からデータを取得
+        source_model = self.sourceModel()
+        if not source_model:
+            return None
+            
+        if role == Qt.ItemDataRole.DecorationRole:
+            # サムネイル画像を取得（列0から）
+            thumbnail_index = source_model.index(source_index.row(), 0)
+            return source_model.data(thumbnail_index, role)
+        elif role == Qt.ItemDataRole.DisplayRole:
+            # ファイル名を表示（列1から）
+            filename_index = source_model.index(source_index.row(), 1)
+            return source_model.data(filename_index, role)
+        elif role == Qt.ItemDataRole.SizeHintRole:
+            # アイテムサイズヒント
+            if hasattr(source_model, 'thumbnail_size'):
+                size = source_model.thumbnail_size
+                if isinstance(size, QSize):
+                    margin = 10
+                    return QSize(size.width() + margin, size.height() + margin)
+                else:
+                    margin = 10
+                    return QSize(size + margin, size + margin)
+            return QSize(110, 110)  # デフォルトサイズ
+        else:
+            # その他のロールは元モデルに委譲
+            return source_model.data(source_index, role)
+    
+    def rowCount(self, parent=QModelIndex()):
+        """行数は元モデルと同じ"""
+        source_model = self.sourceModel()
+        if source_model:
+            return source_model.rowCount(parent)
+        return 0
+
 
 class ImageViewModel(QAbstractTableModel):
     def __init__(self, parent=None, initial_thumbnail_size=100):
@@ -1630,28 +1685,36 @@ class ImageFeatureViewerApp(QMainWindow):
         self.list_view.setSpacing(5)  # より狭い間隔
         self.list_view.setResizeMode(QListView.ResizeMode.Adjust)
         self.list_view.setMovement(QListView.Movement.Static)
+        self.list_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        self.list_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.list_view.doubleClicked.connect(self._open_file_on_double_click)
         self.view_stack.addWidget(self.list_view)
         
-        # 共通のモデルを設定
-        self.model = ImageViewModel(self, initial_thumbnail_size=self.thumbnail_size)
-        self.table_view.setModel(self.model)
-        self.list_view.setModel(self.model)
+        # モデルを設定（テーブルビュー用ベースモデル + リストビュー用プロキシモデル）
+        self.base_model = ImageViewModel(self, initial_thumbnail_size=self.thumbnail_size)
+        self.table_view.setModel(self.base_model)
+        
+        # リストビュー用のプロキシモデル
+        self.list_proxy_model = ListProxyModel(self)
+        self.list_proxy_model.setSourceModel(self.base_model)
+        self.list_view.setModel(self.list_proxy_model)
 
         content_layout.addWidget(self.view_stack)
 
     def _switch_view_mode(self, mode: ViewMode):
-        self.model.set_view_mode(mode)
+        self.base_model.set_view_mode(mode)
         self.table_view_button.setChecked(mode == ViewMode.TABLE)
         self.icon_view_button.setChecked(mode == ViewMode.ICON)
         self.view_stack.setCurrentIndex(mode.value)
         
         if mode == ViewMode.ICON:
             # アイコンサイズを設定
-            self.list_view.setIconSize(QSize(self.thumbnail_size, self.thumbnail_size))
+            size = self.thumbnail_size if isinstance(self.thumbnail_size, int) else self.thumbnail_size.width()
+            self.list_view.setIconSize(QSize(size, size))
             # 統一された狭い間隔でレイアウト
             self.list_view.setGridSize(QSize(
-                self.thumbnail_size + self.ICON_GRID_MARGIN_H,
-                self.thumbnail_size + self.ICON_GRID_MARGIN_V
+                size + self.ICON_GRID_MARGIN_H,
+                size + self.ICON_GRID_MARGIN_V
             ))
 
     def _apply_current_filters(self):
@@ -1707,7 +1770,7 @@ class ImageFeatureViewerApp(QMainWindow):
             display_files = filtered_files[:self.top_n_display_count]
             
             # モデルを更新
-            self.model.set_data(display_files, len(filtered_files))
+            self.base_model.set_data(display_files, len(filtered_files))
 
             # フィルター情報を作成
             filter_info = []
@@ -1953,7 +2016,7 @@ class ImageFeatureViewerApp(QMainWindow):
                 self.list_view.reset()
 
             # モデルにサイズ変更を通知
-            self.model.set_current_thumbnail_size(self.thumbnail_size)
+            self.base_model.set_current_thumbnail_size(self.thumbnail_size)
 
     def _on_thumbnail_size_changed2(self, index=None):
         """サムネイルサイズのコンボボックスが変更されたときのハンドラ"""
@@ -1976,7 +2039,7 @@ class ImageFeatureViewerApp(QMainWindow):
                 self.table_view.verticalHeader().setDefaultSectionSize(self.thumbnail_size + 5)
 
             # モデルにサイズ変更を通知
-            self.model.set_current_thumbnail_size(self.thumbnail_size)
+            self.base_model.set_current_thumbnail_size(self.thumbnail_size)
 
     def _set_display_count(self):
         new_count, ok = QInputDialog.getInt(self, "表示件数を設定", "表示する画像の最大数:",
@@ -2047,7 +2110,7 @@ class ImageFeatureViewerApp(QMainWindow):
             sorted_results = sorted(filtered_results, key=lambda x: x['score'], reverse=True)
             display_data = sorted_results[:self.top_n_display_count]
             
-            self.model.set_data(display_data, total_image_count)
+            self.base_model.set_data(display_data, total_image_count)
             self.status_bar.showMessage(f"検索完了。上位 {len(display_data)} 件を表示中。({total_image_count} 件中)")
 
         except sqlite3.Error as e:
@@ -2160,7 +2223,14 @@ class ImageFeatureViewerApp(QMainWindow):
 
             updated_count = 0
             for index in selected_indexes:
-                row_data = self.model.get_row_data(index.row())
+                # ビューの種類に応じて適切なモデルから取得
+                if self.view_stack.currentIndex() == ViewMode.ICON.value:
+                    # アイコンビューの場合、プロキシモデル経由でデータを取得
+                    source_index = self.list_proxy_model.mapToSource(index)
+                    row_data = self.base_model.get_row_data(source_index.row())
+                else:
+                    # テーブルビューの場合、直接ベースモデルから取得
+                    row_data = self.base_model.get_row_data(index.row())
                 if row_data and 'file_path' in row_data:
                     file_path = row_data['file_path']
                     
@@ -2216,7 +2286,7 @@ class ImageFeatureViewerApp(QMainWindow):
                     if file_info:
                         file_info['score'] = None
                         results.append(file_info)
-                self.model.set_data(results[:self.top_n_display_count], len(results))
+                self.base_model.set_data(results[:self.top_n_display_count], len(results))
                 msg = f"タグフィルター完了。"
                 if include_tags:
                     msg += f"選択: {', '.join(include_tags)} "
@@ -2237,7 +2307,14 @@ class ImageFeatureViewerApp(QMainWindow):
 
     def _open_file_on_double_click(self, index: QModelIndex):
         if index.isValid():
-            row_data = self.model.get_row_data(index.row())
+            # ビューの種類に応じて適切なモデルからデータを取得
+            if self.view_stack.currentIndex() == ViewMode.ICON.value:
+                # アイコンビューの場合、プロキシモデル経由でデータを取得
+                source_index = self.list_proxy_model.mapToSource(index)
+                row_data = self.base_model.get_row_data(source_index.row()) if source_index.isValid() else None
+            else:
+                # テーブルビューの場合、直接ベースモデルから取得
+                row_data = self.base_model.get_row_data(index.row())
             if row_data and 'file_path' in row_data:
                 file_path = row_data['file_path']
                 if os.path.exists(file_path):
@@ -2296,7 +2373,7 @@ class ImageFeatureViewerApp(QMainWindow):
             self.all_images_progress_dialog.close()
             delattr(self, 'all_images_progress_dialog')
         
-        self.model.set_data(data_list, total_count)
+        self.base_model.set_data(data_list, total_count)
         
         displayed_count = len(data_list)
         if displayed_count < total_count:
@@ -2383,7 +2460,7 @@ class ImageFeatureViewerApp(QMainWindow):
             display_files = filtered_files[:self.top_n_display_count]
             
             # モデルを更新
-            self.model.set_data(display_files, len(filtered_files))
+            self.base_model.set_data(display_files, len(filtered_files))
             
             # フィルター情報を作成
             filter_type_names = {
@@ -2526,14 +2603,14 @@ class ImageFeatureViewerApp(QMainWindow):
         """アプリケーション終了時の適切なクリーンアップ"""
         # スレッドプールの安全な終了
         if hasattr(self, 'model') and hasattr(self.model, 'thread_pool'):
-            self.model.thread_pool.clear()  # キューをクリア
-            self.model.thread_pool.waitForDone(3000)  # 最大3秒待機
+            self.base_model.thread_pool.clear()  # キューをクリア
+            self.base_model.thread_pool.waitForDone(3000)  # 最大3秒待機
             
         # シグナル接続をクリーンアップ
         if hasattr(self, 'model') and hasattr(self.model, 'thumbnail_signal_emitter'):
             try:
-                self.model.thumbnail_signal_emitter.thumbnail_ready.disconnect()
-                self.model.thumbnail_signal_emitter.error.disconnect()
+                self.base_model.thumbnail_signal_emitter.thumbnail_ready.disconnect()
+                self.base_model.thumbnail_signal_emitter.error.disconnect()
             except:
                 pass  # 既に切断済みの場合は無視
         
